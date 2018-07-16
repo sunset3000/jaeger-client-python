@@ -15,6 +15,7 @@ from __future__ import print_function
 
 from six.moves import range
 
+import socket
 import logging
 import time
 import collections
@@ -28,6 +29,7 @@ from tornado.concurrent import Future
 from jaeger_client import Span, SpanContext
 from jaeger_client.metrics import LegacyMetricsFactory, Metrics
 from jaeger_client.utils import ErrorReporter
+from jaeger_client import thrift
 from tornado.ioloop import IOLoop
 from tornado.testing import AsyncTestCase, gen_test
 from jaeger_client.reporter import Reporter
@@ -96,7 +98,7 @@ def test_composite_reporter():
 
 class FakeSender(object):
     """
-    Mock the _send() method of the reporter by capturing requests
+    Mock the send() method of the reporter's Sender by capturing requests
     and returning incomplete futures that can be completed from
     inside the test.
     """
@@ -158,7 +160,7 @@ class ReporterTest(AsyncTestCase):
                             queue_capacity=queue_cap)
         reporter.set_process('service', {}, max_length=0)
         sender = FakeSender()
-        reporter._send = sender
+        reporter._sender.send = sender
         return reporter, sender
 
     @tornado.gen.coroutine
@@ -190,24 +192,22 @@ class ReporterTest(AsyncTestCase):
         assert 1 == reporter.metrics_factory.counters[span_dropped_key]
 
     @gen_test
-    def test_submit_failure(self):
-        reporter, sender = self._new_reporter(batch_size=1)
-        reporter.error_reporter = ErrorReporter(
-            metrics=Metrics(), logger=logging.getLogger())
+    def test_submit_failure_with_default_sender(self):
+        for side_effect in (ValueError(), socket.error()):
+            reporter, sender = self._new_reporter(batch_size=1)
+            reporter.error_reporter = ErrorReporter(
+                metrics=Metrics(), logger=logging.getLogger())
 
-        reporter_failure_key = 'jaeger:reporter_spans.result_err'
-        assert reporter_failure_key not in reporter.metrics_factory.counters
+            reporter_failure_key = 'jaeger:reporter_spans.result_err'
+            assert reporter_failure_key not in reporter.metrics_factory.counters
 
-        # simulate exception in send
-        reporter._send = mock.MagicMock(side_effect=ValueError())
-        reporter.report_span(self._new_span('1'))
+            # simulate exception in send
+            reporter._sender.send = mock.MagicMock(side_effect=side_effect)
+            reporter.report_span(self._new_span('1'))
 
-        yield self._wait_for(
-            lambda: reporter_failure_key in reporter.metrics_factory.counters)
-        assert 1 == reporter.metrics_factory.counters.get(reporter_failure_key)
-
-        # silly test, for code coverage only
-        yield reporter._submit([])
+            yield self._wait_for(
+                lambda: reporter_failure_key in reporter.metrics_factory.counters)
+            assert 1 == reporter.metrics_factory.counters.get(reporter_failure_key)
 
     @gen_test
     def test_submit_queue_full_batch_size_1(self):
@@ -275,7 +275,7 @@ class ReporterTest(AsyncTestCase):
             count[0] += 1
             return future_result(True)
 
-        reporter._send = send
+        reporter._sender.send = send
         reporter.batch_size = 3
         for i in range(10):
             reporter.report_span(self._new_span('%s' % i))
@@ -294,22 +294,6 @@ class ReporterTest(AsyncTestCase):
 
 
 class TestReporterUnit:
-    def test_reporter_calls_sender_correctly(self):
-        reporter = Reporter(
-            channel=None,
-            sender=mock.MagicMock(),
-            io_loop=IOLoop.current(),
-            batch_size=10,
-            flush_interval=None,
-            metrics_factory=FakeMetricsFactory(),
-            error_reporter=HardErrorReporter(),
-            queue_capacity=100
-        )
-        test_data = {'foo': 'bar'}
-
-        reporter._send(test_data)
-        reporter._sender.send.assert_called_once_with(test_data)
-
     @pytest.mark.parametrize(
         'channel, sender, expected',
         [

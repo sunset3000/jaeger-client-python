@@ -14,6 +14,7 @@
 from __future__ import print_function
 
 import time
+import socket
 import collections
 
 import mock
@@ -69,45 +70,58 @@ class CustomException(Exception):
 
 
 class SenderFlushTest(AsyncTestCase):
-    @gen_test
-    def test_base_sender_flush_yields_exceptions(self):
+
+    def span(self):
         FakeTracer = collections.namedtuple('FakeTracer', ['ip_address', 'service_name'])
         tracer = FakeTracer(ip_address='127.0.0.1', service_name='reporter_test')
-        sender = senders.Sender()
-        sender.set_process('service', {}, max_length=0)
-
         ctx = SpanContext(trace_id=1, span_id=1, parent_id=None, flags=1)
         span = Span(context=ctx, tracer=tracer, operation_name='foo')
         span.start_time = time.time()
         span.end_time = span.start_time + 0.001  # 1ms
-        sender.spans = [span]
-
-        sender.send = mock.MagicMock(side_effect=CustomException)
-        num_spans, exc, error_msg = yield sender.flush()
-        assert num_spans == 1
-        assert isinstance(exc, CustomException)
-        assert error_msg == 'Failed to send batch: %s'
+        return span
 
     @gen_test
-    def test_flush_batcher_accounting_information_yielded_from_flush(self):
-        @gen.coroutine
-        def stubbed_send(self, batch):
-            pass
-
-        @gen.coroutine
-        def stubbed__flush(self, spans, process):
-            raise gen.Return((100, CustomException(), 'SomeMessage'))
-
+    def test_base_sender_flush_raises_exceptions(self):
         sender = senders.Sender()
         sender.set_process('service', {}, max_length=0)
-        sender.spans = ['foo', 'bar']
-        sender._flush = stubbed__flush.__get__(sender)
-        sender.send = stubbed_send.__get__(sender)
 
-        num_spans, exc, error_msg = yield sender.flush()
-        assert num_spans == 100
-        assert isinstance(exc, CustomException)
-        assert error_msg == 'SomeMessage'
+        sender.spans = [self.span()]
+
+        sender.send = mock.MagicMock(side_effect=CustomException('Failed to send batch.'))
+        assert sender.span_count == 1
+
+        try:
+            yield sender.flush()
+        except Exception as exc:
+            assert isinstance(exc, CustomException)
+            assert str(exc) == 'Failed to send batch.'
+        else:
+            assert False, "Didn't Raise"
+        assert sender.span_count == 0
+
+    @gen_test
+    def test_udp_sender_flush_reraises_exceptions(self):
+        exceptions = ((CustomException, 'Failed to send batch.',
+                       'Failed to submit traces to jaeger-agent: Failed to send batch.'),
+                      (socket.error, 'Connection Failed',
+                       'Failed to submit traces to jaeger-agent socket: Connection Failed'))
+        for exception, value, expected_value in exceptions:
+            sender = senders.UDPSender(host='mock', port=4242)
+            sender.set_process('service', {}, max_length=0)
+
+            sender.spans = [self.span()]
+
+            sender.agent.emitBatch = mock.MagicMock(side_effect=exception(value))
+            assert sender.span_count == 1
+
+            try:
+                yield sender.flush()
+            except Exception as exc:
+                assert isinstance(exc, exception)
+                assert str(exc) == expected_value
+            else:
+                assert False, "Didn't Raise"
+            assert sender.span_count == 0
 
 
 def test_udp_sender_instantiate_thrift_agent():

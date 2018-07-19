@@ -15,7 +15,6 @@ from __future__ import print_function
 
 from six.moves import range
 
-import socket
 import logging
 import time
 import collections
@@ -29,7 +28,6 @@ from tornado.concurrent import Future
 from jaeger_client import Span, SpanContext
 from jaeger_client.metrics import LegacyMetricsFactory, Metrics
 from jaeger_client.utils import ErrorReporter
-from jaeger_client import thrift
 from tornado.ioloop import IOLoop
 from tornado.testing import AsyncTestCase, gen_test
 from jaeger_client.reporter import Reporter
@@ -192,22 +190,19 @@ class ReporterTest(AsyncTestCase):
         assert 1 == reporter.metrics_factory.counters[span_dropped_key]
 
     @gen_test
-    def test_submit_failure_with_default_sender(self):
-        for side_effect in (ValueError(), socket.error()):
-            reporter, sender = self._new_reporter(batch_size=1)
-            reporter.error_reporter = ErrorReporter(
-                metrics=Metrics(), logger=logging.getLogger())
+    def test_submit_failure(self):
+        reporter, sender = self._new_reporter(batch_size=1)
+        reporter.error_reporter = ErrorReporter(
+            metrics=Metrics(), logger=logging.getLogger())
 
-            reporter_failure_key = 'jaeger:reporter_spans.result_err'
-            assert reporter_failure_key not in reporter.metrics_factory.counters
+        reporter_failure_key = 'jaeger:reporter_spans.result_err'
+        assert reporter_failure_key not in reporter.metrics_factory.counters
 
-            # simulate exception in send
-            reporter._sender.send = mock.MagicMock(side_effect=side_effect)
-            reporter.report_span(self._new_span('1'))
-
-            yield self._wait_for(
-                lambda: reporter_failure_key in reporter.metrics_factory.counters)
-            assert 1 == reporter.metrics_factory.counters.get(reporter_failure_key)
+        reporter._sender.send = mock.MagicMock(side_effect=ValueError())
+        reporter.report_span(self._new_span('1'))
+        yield self._wait_for(
+            lambda: reporter_failure_key in reporter.metrics_factory.counters)
+        assert 1 == reporter.metrics_factory.counters.get(reporter_failure_key)
 
     @gen_test
     def test_submit_queue_full_batch_size_1(self):

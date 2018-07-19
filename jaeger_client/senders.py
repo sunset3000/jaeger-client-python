@@ -13,9 +13,11 @@
 # limitations under the License.
 from __future__ import absolute_import
 
+import sys
 import socket
 import logging
 import tornado.gen
+from six import reraise
 from threadloop import ThreadLoop
 
 from . import thrift
@@ -42,52 +44,30 @@ class Sender(object):
         """Queue a span for subsequent submission calls to flush()"""
         self.spans.append(span)
 
+    @property
+    def span_count(self):
+        return len(self.spans)
+
     @tornado.gen.coroutine
     def flush(self):
-        """
-        Examine span and process state before yielding to _flush() for batching and transport.
-        Returns a tuple for accounting the number of spans attempted to send along with any
-        raised Exception and error message info, if any, yielded from _flush().
-        """
-        if not self.spans:
-            return
-        with self._process_lock:
-            process = self._process
-            if not process:
-                return
-
-        num_spans, exc, error_msg = yield self._flush(self.spans, self._process)
-
-        self.spans = []
-
-        raise tornado.gen.Return((num_spans, exc, error_msg))
+        """Examine span and process state before yielding to _flush() for batching and transport."""
+        if self.spans:
+            with self._process_lock:
+                process = self._process
+            if process:
+                try:
+                    yield self._flush(self.spans, self._process)
+                finally:
+                    self.spans = []
 
     @tornado.gen.coroutine
     def _flush(self, spans, process):
-        """
-        Batch spans and invokes send() while calculating spans sent and providing all exception
-        handling.  Override with specific batching logic and error messaging, if desired.
-        """
-        num_spans = len(spans)
-        exc = None
-        error_msg = ''
-
+        """Batch spans and invokes send(). Override with specific batching logic, if desired."""
         batch = thrift.make_jaeger_batch(spans=spans, process=process)
-
-        try:
-            yield self.send(batch)
-        except Exception as e:
-            exc = e
-            error_msg = 'Failed to send batch: %s'
-
-        raise tornado.gen.Return((num_spans, exc, error_msg))
+        yield self.send(batch)
 
     @tornado.gen.coroutine
     def send(self, batch):
-        """
-        Send batch of spans out via thrift transport. Any exceptions thrown
-        will be caught in the flush exception handler of _flush().
-        """
         raise NotImplementedError('This method should be implemented by subclasses')
 
     def set_process(self, service_name, tags, max_length):
@@ -117,7 +97,18 @@ class UDPSender(Sender):
 
     @tornado.gen.coroutine
     def send(self, batch):
-        return self.agent.emitBatch(batch)
+        """
+        Send batch of spans out via thrift transport.
+        """
+        try:
+            yield self.agent.emitBatch(batch)
+        except socket.error as e:
+            reraise(type(e),
+                    type(e)('Failed to submit traces to jaeger-agent socket: {}'.format(e)),
+                    sys.exc_info()[2])
+        except Exception as e:
+            reraise(type(e), type(e)('Failed to submit traces to jaeger-agent: {}'.format(e)),
+                    sys.exc_info()[2])
 
     def _create_local_agent_channel(self, io_loop):
         """
@@ -134,25 +125,6 @@ class UDPSender(Sender):
             reporting_port=self.port,
             io_loop=io_loop
         )
-
-    @tornado.gen.coroutine
-    def _flush(self, spans, process):
-        num_spans = len(spans)
-        exc = None
-        error_msg = ''
-
-        batch = thrift.make_jaeger_batch(spans=spans, process=process)
-
-        try:
-            yield self.send(batch)
-        except socket.error as e:
-            exc = e
-            error_msg = 'Failed to submit traces to jaeger-agent socket: %s'
-        except Exception as e:
-            exc = e
-            error_msg = 'Failed to submit traces to jaeger-agent: %s'
-
-        raise tornado.gen.Return((num_spans, exc, error_msg))
 
     # method for protocol factory
     def getProtocol(self, transport):

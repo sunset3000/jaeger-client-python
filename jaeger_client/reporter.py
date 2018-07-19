@@ -160,15 +160,14 @@ class Reporter(NullReporter):
 
     @tornado.gen.coroutine
     def _consume_queue(self):
-        spans_appended = 0
         stopped = False
 
         while not stopped:
-            while spans_appended < self.batch_size:
+            while self._sender.span_count < self.batch_size:
                 try:
                     # using timeout allows periodic flush with smaller packet
                     timeout = self.flush_interval + self.io_loop.time() \
-                        if self.flush_interval and spans_appended else None
+                        if self.flush_interval and self._sender.span_count else None
                     span = yield self.queue.get(timeout=timeout)
                 except tornado.gen.TimeoutError:
                     break
@@ -180,18 +179,20 @@ class Reporter(NullReporter):
                         break
                     else:
                         self._sender.append(span)
-                        spans_appended += 1
 
-            if spans_appended:
-                num_spans, exc, error_msg = yield self._sender.flush()
-                spans_appended = 0
-                if exc:
+            if self._sender.span_count:
+                num_spans = self._sender.span_count
+                try:
+                    yield self._sender.flush()
+                except Exception as exc:
                     self.metrics.reporter_failure(num_spans)
-                    self.error_reporter.error(error_msg, exc)
+                    self.error_reporter.error(exc)
                 else:
                     self.metrics.reporter_success(num_spans)
+
                 for _ in range(num_spans):
                     self.queue.task_done()
+
             self.metrics.reporter_queue_length(self.queue.qsize())
         self.logger.info('Span publisher exited')
 

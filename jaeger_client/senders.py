@@ -13,15 +13,16 @@
 # limitations under the License.
 from __future__ import absolute_import
 
-import sys
 import socket
 import logging
 import tornado.gen
-from six import reraise
+import tornado.httpclient
 from threadloop import ThreadLoop
 
 from . import thrift
 from .local_agent_net import LocalAgentSender
+from .utils import raise_with_value
+from thrift.TSerialization import serialize
 from thrift.protocol import TCompactProtocol
 
 from jaeger_client.thrift_gen.agent import Agent
@@ -103,12 +104,9 @@ class UDPSender(Sender):
         try:
             yield self.agent.emitBatch(batch)
         except socket.error as e:
-            reraise(type(e),
-                    type(e)('Failed to submit traces to jaeger-agent socket: {}'.format(e)),
-                    sys.exc_info()[2])
+            raise_with_value(e, 'Failed to submit traces to jaeger-agent socket: {}'.format(e))
         except Exception as e:
-            reraise(type(e), type(e)('Failed to submit traces to jaeger-agent: {}'.format(e)),
-                    sys.exc_info()[2])
+            raise_with_value(e, 'Failed to submit traces to jaeger-agent: {}'.format(e))
 
     def _create_local_agent_channel(self, io_loop):
         """
@@ -134,3 +132,52 @@ class UDPSender(Sender):
         :return: Thrift compact protocol
         """
         return TCompactProtocol.TCompactProtocol(transport)
+
+
+class HTTPSender(Sender):
+    def __init__(self, endpoint, format_params='?format=jaeger.thrift',
+                 auth_token='', user='', password='', io_loop=None):
+        super(HTTPSender, self).__init__(io_loop=io_loop)
+        self.url = endpoint + format_params
+        self.auth_token = auth_token
+        self.user = user
+        self.password = password
+
+    @tornado.gen.coroutine
+    def send(self, batch):
+        """
+        Send batch of spans out via AsyncHTTPClient. Any exceptions thrown
+        will be caught above in the exception handler of _submit().
+        """
+        headers = {'Content-Type': 'application/x-thrift'}
+
+        auth_args = {}
+        if self.auth_token:
+            headers['Authorization'] = 'Bearer {}'.format(self.auth_token)
+        elif self.user and self.password:
+            auth_args['auth_mode'] = 'basic'
+            auth_args['auth_username'] = self.user
+            auth_args['auth_password'] = self.password
+
+        client = tornado.httpclient.AsyncHTTPClient()
+        body = serialize(batch)
+        headers['Content-Length'] = str(len(body))
+
+        request = tornado.httpclient.HTTPRequest(
+            method='POST',
+            url=self.url,
+            headers=headers,
+            body=body,
+            **auth_args
+        )
+
+        try:
+            yield client.fetch(request)
+        except socket.error as e:
+            raise_with_value(e, 'Failed to connect to jaeger_endpoint: {}'.format(e))
+        except tornado.httpclient.HTTPError as e:
+            # HTTPErrors don't use std Exception signature, so can be altered directly
+            e.message = 'Error received from Jaeger: {}'.format(e.message)
+            raise
+        except Exception as e:
+            raise_with_value(e, 'POST to jaeger_endpoint failed: {}'.format(e))

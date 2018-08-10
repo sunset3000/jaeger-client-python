@@ -327,3 +327,20 @@ class TestReporterUnit:
         sender = mock.MagicMock()
         reporter = Reporter(channel=channel, sender=sender)
         assert reporter.io_loop == sender._io_loop, "Reporter didn't set its io_loop from Sender's"
+
+    @pytest.mark.parametrize(
+        'channel, sender, expected',
+        [
+            (None, None, None),
+            (None, type('X', (object,), {'io_loop': 'foo'}), 'foo'),
+            (type('X', (object,), {'io_loop': 'bar'}), None, 'bar'),
+            (
+                type('X', (object,), {'io_loop': 'bar'}),
+                type('X', (object,), {'io_loop': 'foo'}),
+                'bar'
+            ),
+        ]
+    )
+    def test_reporter_fetch_io_loop_works_as_expected(self, channel, sender, expected):
+        result = Reporter._fetch_io_loop(channel, sender)
+        assert expected == result

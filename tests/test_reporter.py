@@ -303,5 +303,5 @@ class TestReporterUnit:
         ]
     )
     def test_reporter_fetch_io_loop_works_as_expected(self, channel, sender, expected):
-        result = Reporter.fetch_io_loop(channel, sender)
+        result = Reporter._fetch_io_loop(channel, sender)
         assert expected == result

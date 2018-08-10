@@ -109,6 +109,7 @@ class Sender(object):
 
 
 class UDPSender(Sender):
+
     def __init__(self, host, port, io_loop=None, agent=None, batch_size=10):
         super(UDPSender, self).__init__(io_loop=io_loop, batch_size=batch_size)
         self._host = host

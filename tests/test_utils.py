@@ -81,3 +81,32 @@ def test_local_ip_does_not_blow_up():
 def test_get_local_ip_by_socket_does_not_blow_up():
     import jaeger_client.utils
     jaeger_client.utils.get_local_ip_by_socket()
+
+
+class CustomException(Exception):
+    pass
+
+
+def test_raise_with_value_reraises():
+    try:
+        raise CustomException("Initial Value")
+    except Exception as e:
+        try:
+            utils.raise_with_value(e, "New Value")
+        except Exception as e:
+            assert type(e) == CustomException
+            assert str(e) == "New Value"
+        else:
+            assert False, 'Failed to raise'
+    else:
+        assert False, 'Failed to raise'
+
+
+def test_raise_with_value_raises():
+    try:
+        utils.raise_with_value(CustomException, "Some Value")
+    except Exception as e:
+        assert type(e) == CustomException
+        assert str(e) == "Some Value"
+    else:
+        assert False, 'Failed to raise'

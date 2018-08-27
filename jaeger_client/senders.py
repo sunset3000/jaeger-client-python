@@ -13,16 +13,16 @@
 # limitations under the License.
 from __future__ import absolute_import
 
-import sys
 import socket
 import logging
 import tornado.gen
-from six import reraise
 from threadloop import ThreadLoop
 
 from . import thrift
+from .utils import raise_with_value
 from .local_agent_net import LocalAgentSender
 from thrift.protocol import TCompactProtocol
+from thrift.transport import TTransport
 
 from jaeger_client.thrift_gen.agent import Agent
 
@@ -88,6 +88,11 @@ class Sender(object):
         raise NotImplementedError('This method should be implemented by subclasses')
 
 
+class UDPSenderException(Exception):
+
+    pass
+
+
 class UDPSender(Sender):
     def __init__(self, host, port, io_loop=None, agent=None):
         super(UDPSender, self).__init__(io_loop=io_loop)
@@ -95,6 +100,7 @@ class UDPSender(Sender):
         self._port = port
         self._channel = self._create_local_agent_channel(self._io_loop)
         self._agent = agent or Agent.Client(self._channel, self)
+        self._max_span_space = None
 
     @tornado.gen.coroutine
     def send(self, batch):
@@ -104,12 +110,57 @@ class UDPSender(Sender):
         try:
             yield self._agent.emitBatch(batch)
         except socket.error as e:
-            reraise(type(e),
-                    type(e)('Failed to submit traces to jaeger-agent socket: {}'.format(e)),
-                    sys.exc_info()[2])
+            raise_with_value(e, 'Failed to submit traces to jaeger-agent socket: {}'.format(e))
         except Exception as e:
-            reraise(type(e), type(e)('Failed to submit traces to jaeger-agent: {}'.format(e)),
-                    sys.exc_info()[2])
+            raise_with_value(e, 'Failed to submit traces to jaeger-agent: {}'.format(e))
+
+    @tornado.gen.coroutine
+    def _flush(self, spans, process):
+        """
+        Batches and sends spans in as many UDP packets as necessary.  Will drop any span with size
+        greater than allowable relative to minimum batch size and maximum UDP payload.
+        """
+        flush_error = None
+        batched_spans = []
+        total_span_bytes = 0
+        if self._max_span_space is None:
+            self._max_span_space = 65000 - self._calculate_base_batch_size(process)
+
+        for span in spans:
+            span_size = self._calculate_span_size(span)
+            if span_size > self._max_span_space:
+                flush_error = UDPSenderException(
+                    'Cannot send span of size {}. Dropping.'.format(span_size)
+                )
+            elif total_span_bytes + span_size > self._max_span_space:
+                batch = thrift.make_jaeger_batch(spans=batched_spans, process=process)
+                yield self.send(batch)
+                batched_spans = [span]
+                total_span_bytes = span_size
+            else:
+                batched_spans.append(span)
+                total_span_bytes += span_size
+
+        batch = thrift.make_jaeger_batch(spans=batched_spans, process=process)
+        yield self.send(batch)
+
+        if flush_error is not None:
+            raise flush_error
+
+    def _calculate_base_batch_size(self, process):
+        """Determine what size the batch will be without any spans"""
+        buff = TTransport.TMemoryBuffer()
+        proto = self.getProtocol(buff)
+        base_batch = thrift.make_jaeger_batch(spans=[], process=process)
+        base_batch.write(proto)
+        return len(buff.getvalue())
+
+    def _calculate_span_size(self, span):
+        buff = TTransport.TMemoryBuffer()
+        proto = self.getProtocol(buff)
+        jaeger_span = thrift.make_jaeger_span(span)
+        jaeger_span.write(proto)
+        return len(buff.getvalue())
 
     def _create_local_agent_channel(self, io_loop):
         """

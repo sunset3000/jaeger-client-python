@@ -18,6 +18,9 @@ import fcntl
 import socket
 import struct
 import time
+import sys
+
+from six import reraise
 
 
 class ErrorReporter(object):
@@ -89,3 +92,12 @@ def interface_ip(interface):
     # Explanation:
     # http://stackoverflow.com/questions/11735821/python-get-localhost-ip
     # http://stackoverflow.com/questions/24196932/how-can-i-get-the-ip-address-of-eth0-in-python
+
+
+def raise_with_value(exception, value):
+    """
+    Raise an instance of an exception type or reraise an instance with a
+    modified message and unchanged traceback.
+    """
+    _type = exception if isinstance(exception, type) else type(exception)
+    reraise(_type, _type(value), sys.exc_info()[2])

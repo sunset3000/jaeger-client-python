@@ -13,6 +13,7 @@
 # limitations under the License.
 from __future__ import print_function
 
+import sys
 import time
 import socket
 import collections
@@ -22,7 +23,7 @@ import pytest
 from tornado import ioloop
 from tornado.testing import AsyncTestCase, gen_test
 
-from jaeger_client import senders
+from jaeger_client import senders, thrift
 from jaeger_client import Span, SpanContext
 from jaeger_client.local_agent_net import LocalAgentSender
 from jaeger_client.thrift_gen.agent import Agent
@@ -71,8 +72,8 @@ class CustomException(Exception):
 class SenderFlushTest(AsyncTestCase):
 
     def span(self):
-        FakeTracer = collections.namedtuple('FakeTracer', ['ip_address', 'service_name'])
-        tracer = FakeTracer(ip_address='127.0.0.1', service_name='reporter_test')
+        FakeTracer = collections.namedtuple('FakeTracer', ['ip_address', 'service_name', 'max_tag_value_length'])
+        tracer = FakeTracer(ip_address='127.0.0.1', service_name='reporter_test', max_tag_value_length=sys.maxsize)
         ctx = SpanContext(trace_id=1, span_id=1, parent_id=None, flags=1)
         span = Span(context=ctx, tracer=tracer, operation_name='foo')
         span.start_time = time.time()
@@ -121,6 +122,56 @@ class SenderFlushTest(AsyncTestCase):
             else:
                 assert False, "Didn't Raise"
             assert sender.span_count == 0
+
+    @gen_test
+    def test_udp_sender_large_span_dropped_on_flush(self):
+        sender = senders.UDPSender(host='mock', port=4242)
+        sender.set_process('service', {'tagOne': 'someTagValue'}, max_length=0)
+
+        span_to_send = self.span()
+        span_to_filter = self.span()
+        span_to_filter.set_tag('someTag', '.' * 65000)
+        sender.spans = [span_to_send, span_to_filter]
+
+        batch_store = []
+        def mock_emit_batch(batch):
+            batch_store.append(batch)
+
+        with mock.patch.object(sender._agent, 'emitBatch',
+                               gen.coroutine(mock_emit_batch)):
+            try:
+                yield sender.flush()
+            except Exception as exc:
+                assert isinstance(exc, senders.UDPSenderException)
+                assert 'Cannot send span of size' in str(exc)
+            else:
+                assert False, "Didn't Raise"
+
+        assert batch_store[0].spans == [thrift.make_jaeger_span(span_to_send)]
+
+    @gen_test
+    def test_udp_sender_batches_spans_over_multiple_packets_on_flush(self):
+        sender = senders.UDPSender(host='mock', port=4242)
+        sender.set_process('service', {'tagOne': 'someTagValue'}, max_length=0)
+
+        spans = [self.span() for _ in range(60)]
+        for span in spans:
+            span.set_tag('tag', '.' * 10000)  # Send 10 batches of 6
+        sender.spans = list(spans)
+
+        batch_store = []
+        def mock_emit_batch(batch):
+            batch_store.append(batch)
+
+        with mock.patch.object(sender._agent, 'emitBatch',
+                               gen.coroutine(mock_emit_batch)):
+            yield sender.flush()
+
+        assert len(batch_store) == 10
+        c = 0
+        for i in range(10):
+            assert batch_store[i].spans == [thrift.make_jaeger_span(span) for span in spans[c:c+6]]
+            c += 6
 
 
 def test_udp_sender_instantiate_thrift_agent():

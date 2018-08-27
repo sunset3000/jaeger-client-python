@@ -113,7 +113,7 @@ class FakeSender(object):
 
 
 class HardErrorReporter(object):
-    def error(self, name, count, *args):
+    def error(self, *args):
         raise ValueError(*args)
 
 

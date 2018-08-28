@@ -21,13 +21,14 @@ import threading
 import opentracing
 from opentracing.propagation import Format
 from . import Tracer
-from .local_agent_net import LocalAgentSender
+from .local_agent_net import LocalAgentReader, LocalAgentSender
 from .throttler import RemoteThrottler
 from .reporter import (
     Reporter,
     CompositeReporter,
     LoggingReporter,
 )
+from .senders import HTTPSender
 from .sampler import (
     ConstSampler,
     ProbabilisticSampler,
@@ -94,10 +95,12 @@ class Config(object):
         :param scope_manager: a class implementing a scope manager, or None for
             default (ThreadLocalScopeManager).
         """
-        if validate:
-            self._validate_config(config)
         self.config = config
         self.scope_manager = scope_manager
+        if validate:
+            self._validate_config(config)
+            self._validate_auth()
+
         if get_boolean(self.config.get('metrics', True), True):
             self._metrics_factory = metrics_factory or LegacyMetricsFactory(metrics or Metrics())
         else:
@@ -128,12 +131,24 @@ class Config(object):
                         'generate_128bit_trace_id',
                         'baggage_header_prefix',
                         'service_name',
-                        'throttler']
+                        'throttler',
+                        'jaeger_endpoint',
+                        'jaeger_auth_token',
+                        'jaeger_user',
+                        'jaeger_password']
         config_keys = config.keys()
         unexpected_config_keys = [k for k in config_keys if k not in allowed_keys]
         if unexpected_config_keys:
             raise ValueError('Unexpected keys found in config:{}'.
                              format(','.join(unexpected_config_keys)))
+
+    def _validate_auth(self):
+        if self.jaeger_auth_token and (self.jaeger_user or self.jaeger_password):
+            raise ValueError('Cannot accept both jaeger_auth_token and '
+                             'jaeger_user/jaeger_password for authentication')
+        if bool(self.jaeger_user) != bool(self.jaeger_password):
+            raise ValueError('Must provide both jaeger_user and jaeger_password for '
+                             'authentication.')
 
     @property
     def service_name(self):
@@ -332,6 +347,22 @@ class Config(object):
         except:  # noqa: E722
             return DEFAULT_THROTTLER_REFRESH_INTERVAL
 
+    @property
+    def jaeger_endpoint(self):
+        return self.config.get('jaeger_endpoint', os.getenv('JAEGER_ENDPOINT'))
+
+    @property
+    def jaeger_auth_token(self):
+        return self.config.get('jaeger_auth_token', os.getenv('JAEGER_AUTH_TOKEN'))
+
+    @property
+    def jaeger_user(self):
+        return self.config.get('jaeger_user', os.getenv('JAEGER_USER'))
+
+    @property
+    def jaeger_password(self):
+        return self.config.get('jaeger_password', os.getenv('JAEGER_PASSWORD'))
+
     @staticmethod
     def initialized():
         with Config._initialized_lock:
@@ -360,8 +391,20 @@ class Config(object):
         Create a new Jaeger Tracer based on the passed `jaeger_client.Config`.
         Does not set `opentracing.tracer` global variable.
         """
+        channel = self._create_local_agent_channel(
+            io_loop=io_loop,
+            reader=bool(self.jaeger_endpoint)
+        )
+        sender = None
+        if self.jaeger_endpoint:
+            sender = HTTPSender(
+                endpoint=self.jaeger_endpoint,
+                auth_token=self.jaeger_auth_token,
+                user=self.jaeger_user,
+                password=self.jaeger_password,
+                io_loop=channel.io_loop
+            )
 
-        channel = self._create_local_agent_channel(io_loop=io_loop)
         sampler = self.sampler
         if not sampler:
             sampler = RemoteControlledSampler(
@@ -381,7 +424,8 @@ class Config(object):
             flush_interval=self.reporter_flush_interval,
             logger=logger,
             metrics_factory=self._metrics_factory,
-            error_reporter=self.error_reporter
+            error_reporter=self.error_reporter,
+            sender=sender
         )
 
         if self.logging:
@@ -426,7 +470,7 @@ class Config(object):
         logger.info('opentracing.tracer initialized to %s[app_name=%s]',
                     tracer, self.service_name)
 
-    def _create_local_agent_channel(self, io_loop):
+    def _create_local_agent_channel(self, io_loop, reader=False):
         """
         Create an out-of-process channel communicating to local jaeger-agent.
         Spans are submitted as SOCK_DGRAM Thrift, sampling strategy is polled
@@ -434,8 +478,14 @@ class Config(object):
 
         :param self: instance of Config
         """
-        logger.info('Initializing Jaeger Tracer with UDP reporter')
-        return LocalAgentSender(
+        if reader:
+            logger.info('Initializing Jaeger Tracer with HTTP reporter')
+            Agent = LocalAgentReader
+        else:
+            logger.info('Initializing Jaeger Tracer with UDP reporter')
+            Agent = LocalAgentSender
+
+        return Agent(
             host=self.local_agent_reporting_host,
             sampling_port=self.local_agent_sampling_port,
             reporting_port=self.local_agent_reporting_port,

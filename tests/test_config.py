@@ -20,10 +20,15 @@ from jaeger_client import Config, ConstSampler, ProbabilisticSampler, RateLimiti
 from jaeger_client.config import DEFAULT_THROTTLER_PORT
 from jaeger_client.metrics import MetricsFactory
 from jaeger_client.reporter import NullReporter
+from jaeger_client.senders import HTTPSender
 from jaeger_client import constants
 
 
 class ConfigTests(unittest.TestCase):
+
+    def setUp(self):
+        if Config.initialized():
+            Config._initialized = False
 
     def test_enabled(self):
         c = Config({'enabled': True}, service_name='x')
@@ -173,3 +178,64 @@ class ConfigTests(unittest.TestCase):
 
         os.environ.pop('JAEGER_TRACEID_128BIT')
         assert os.getenv('JAEGER_TRACEID_128BIT', None) is None
+
+    def test_global_tracer_initializaion(self):
+        c = Config({}, service_name='x')
+        tracer = c.initialize_tracer()
+        assert tracer
+        attempt = c.initialize_tracer()
+        assert attempt is None
+
+    def test_jaeger_endpoint(self):
+        c = Config({'jaeger_endpoint': 'some_endpoint'}, service_name='x')
+        assert c.jaeger_endpoint == 'some_endpoint'
+        os.environ['JAEGER_ENDPOINT'] = 'SomeEndpoint'
+        c = Config({}, service_name='x')
+        assert c.jaeger_endpoint == 'SomeEndpoint'
+        del os.environ['JAEGER_ENDPOINT']
+
+    def test_jaeger_auth_token(self):
+        c = Config({'jaeger_auth_token': 'some_token'},
+                   service_name='x', validate=True)
+        assert c.jaeger_auth_token == 'some_token'
+        os.environ['JAEGER_AUTH_TOKEN'] = 'SomeToken'
+        c = Config({}, service_name='x')
+        assert c.jaeger_auth_token == 'SomeToken'
+        del os.environ['JAEGER_AUTH_TOKEN']
+
+    def test_jaeger_user_and_password(self):
+        c = Config({'jaeger_user': 'some_user',
+                    'jaeger_password': 'some_password'},
+                    service_name='x', validate=True)
+        assert c.jaeger_user == 'some_user'
+        assert c.jaeger_password == 'some_password'
+        os.environ['JAEGER_USER'] = 'SomeUser'
+        os.environ['JAEGER_PASSWORD'] = 'SomePassword'
+        c = Config({}, service_name='x')
+        assert c.jaeger_user == 'SomeUser'
+        assert c.jaeger_password == 'SomePassword'
+        del os.environ['JAEGER_USER']
+        del os.environ['JAEGER_PASSWORD']
+
+    def test_jaeger_auth_token_and_basic_mutually_exclusive(self):
+        with self.assertRaises(ValueError) as e:
+            c = Config({'jaeger_auth_token': 'some_token',
+                        'jaeger_user': 'some_user',
+                        'jaeger_password': 'some_password'},
+                        service_name='x', validate=True)
+        assert e.exception.args[0] == ('Cannot accept both jaeger_auth_token and '
+                                       'jaeger_user/jaeger_password for authentication')
+
+    def test_jaeger_user_and_password_required(self):
+        for cfg in ({'jaeger_user': 'some_user'},
+                    {'jaeger_password': 'some_password'}):
+            with self.assertRaises(ValueError) as e:
+                Config(cfg, service_name='x', validate=True)
+
+            assert e.exception.args[0] == ('Must provide both jaeger_user and '
+                                           'jaeger_password for authentication.')
+
+    def test_specifying_jaeger_endpoint_creates_http_sender(self):
+        c = Config({'jaeger_endpoint': 'some_endpoint'}, service_name='x')
+        tracer = c.initialize_tracer()
+        assert isinstance(tracer.reporter._sender, HTTPSender)

@@ -24,6 +24,7 @@ from jaeger_client.reporter import NullReporter
 import crossdock.server.constants as constants
 import crossdock.server.serializer as serializer
 from crossdock.server.endtoend import EndToEndHandler
+from opentracing.scope_managers.tornado import TornadoScopeManager
 from opentracing_instrumentation import http_client, http_server, get_current_span, request_context
 from opentracing_instrumentation.client_hooks import tornado_http
 import opentracing.ext.tags as ext_tags
@@ -42,7 +43,8 @@ DefaultServerPortTChannel = 8082
 tracer = Tracer(
     service_name='python',
     reporter=NullReporter(),
-    sampler=ConstSampler(decision=True))
+    sampler=ConstSampler(decision=True),
+    scope_manager=TornadoScopeManager)
 opentracing.tracer = tracer
 
 

@@ -17,6 +17,8 @@ import logging
 import json
 import os
 
+from opentracing.scope_managers.tornado import TornadoScopeManager
+
 from jaeger_client.local_agent_net import LocalAgentSender
 from jaeger_client.config import (
     Config,
@@ -82,13 +84,16 @@ class EndToEndHandler(object):
             service_name=cfg.service_name,
             reporter=reporter,
             sampler=remote_sampler,
-            throttler=throttler)
+            throttler=throttler,
+            scope_manager=TornadoScopeManager
+        )
 
         const_tracer = Tracer(
             service_name=cfg.service_name,
             reporter=reporter,
             sampler=ConstSampler(decision=True),
-            throttler=throttler
+            throttler=throttler,
+            scope_manager=TornadoScopeManager
         )
 
         self._tracers = {
@@ -120,10 +125,10 @@ class EndToEndHandler(object):
         sampler_type = req.get('type', 'remote')
         tracer = self.tracers[sampler_type]
         for _ in range(req.get('count', 0)):
-            span = tracer.start_span(req['operation'])
-            for k, v in req.get('tags', {}).iteritems():
-                span.set_tag(k, v)
-            span.finish()
+            with tracer.start_active_span(req['operation']) as scope:
+                span = scope.span
+                for k, v in req.get('tags', {}).iteritems():
+                    span.set_tag(k, v)
         response_writer.finish()
 
 

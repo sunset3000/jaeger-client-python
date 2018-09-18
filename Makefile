@@ -2,7 +2,7 @@ project := jaeger_client
 projects := jaeger_client crossdock
 flake8 := flake8
 COV_DIRS := $(projects:%=--cov %)
-pytest_args := --pdb -vs --tb short --cov-config .coveragerc $(COV_DIRS) tests
+pytest_args := -s --tb short --cov-config .coveragerc $(COV_DIRS) tests
 pytest := py.test $(pytest_args)
 sources := $(shell find $(projects) tests -name '*.py' | grep -v version.py | grep -v thrift_gen)
 

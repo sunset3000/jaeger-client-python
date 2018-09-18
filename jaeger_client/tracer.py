@@ -86,7 +86,6 @@ class Tracer(opentracing.Tracer):
         if tags:
             self.tags.update(tags)
 
-
         if self.tags.get(constants.JAEGER_IP_TAG_KEY) is None:
             self.tags[constants.JAEGER_IP_TAG_KEY] = local_ip()
 
@@ -239,7 +238,6 @@ class Tracer(opentracing.Tracer):
             ignore_active_span,
         )
         return self.scope_manager.activate(span, finish_on_close)
-
 
     def inject(self, span_context, format, carrier):
         codec = self.codecs.get(format, None)

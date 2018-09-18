@@ -24,6 +24,7 @@ from mock import MagicMock
 from tornado.httpclient import HTTPRequest
 from jaeger_client import Tracer, ConstSampler
 from jaeger_client.reporter import InMemoryReporter
+from opentracing.scope_managers.tornado import TornadoScopeManager
 from crossdock.server.endtoend import EndToEndHandler, _determine_host_port, _parse_host_port
 
 if six.PY2:
@@ -47,6 +48,7 @@ def tracer():
         service_name='test-tracer',
         sampler=ConstSampler(True),
         reporter=InMemoryReporter(),
+        scope_manager=TornadoScopeManager
     )
     try:
         yield tracer
@@ -68,7 +70,6 @@ for s2 in ['HTTP', 'TCHANNEL']:
 def test_trace_propagation(
         s2_transport, s3_transport, sampled, tracer,
         base_url, http_port, http_client):
-
     # verify that server is ready
     yield http_client.fetch(
         request=HTTPRequest(

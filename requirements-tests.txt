@@ -1,5 +1,6 @@
 # add dependencies in setup.py
 
 -r requirements.txt
+git+https://github.com/yurishkuro/opentracing-python-instrumentation@ot_scopemanager_integration#egg=opentracing-instrumentation
 
 -e .[tests]

@@ -20,16 +20,14 @@ import threading
 import tornado.gen
 import tornado.ioloop
 import tornado.queues
-import socket
 from tornado.concurrent import Future
 from .constants import DEFAULT_FLUSH_INTERVAL
-from . import thrift
 from . import ioloop_util
 from .metrics import Metrics, LegacyMetricsFactory
+from jaeger_client.thrift_gen.agent import Agent
+from .senders import UDPSender
 from .utils import ErrorReporter
 
-from thrift.protocol import TCompactProtocol
-from jaeger_client.thrift_gen.agent import Agent
 
 default_logger = logging.getLogger('jaeger_tracing')
 
@@ -78,9 +76,11 @@ class Reporter(NullReporter):
     def __init__(self, channel, queue_capacity=100, batch_size=10,
                  flush_interval=DEFAULT_FLUSH_INTERVAL, io_loop=None,
                  error_reporter=None, metrics=None, metrics_factory=None,
-                 **kwargs):
+                 sender=None, **kwargs):
         """
         :param channel: a communication channel to jaeger-agent
+        :param sender: senders.Sender subclass implementing send method,
+            for sending batch of spans to jaeger.
         :param queue_capacity: how many spans we can hold in memory before
             starting to drop spans
         :param batch_size: how many spans we can submit at once to Collector
@@ -97,19 +97,21 @@ class Reporter(NullReporter):
         """
         from threading import Lock
 
-        self._channel = channel
+        # TODO for next major rev: remove channel param in favor of sender
+        self.agent = Agent.Client(channel, self)
+        self._sender = sender or self._create_default_sender(channel, self.agent)
         self.queue_capacity = queue_capacity
         self.batch_size = batch_size
         self.metrics_factory = metrics_factory or LegacyMetricsFactory(metrics or Metrics())
         self.metrics = ReporterMetrics(self.metrics_factory)
         self.error_reporter = error_reporter or ErrorReporter(Metrics())
         self.logger = kwargs.get('logger', default_logger)
-        self.agent = Agent.Client(self._channel, self)
 
         if queue_capacity < batch_size:
             raise ValueError('Queue capacity cannot be less than batch size')
 
-        self.io_loop = io_loop or channel.io_loop
+        self.io_loop = io_loop or self._fetch_io_loop(channel, self._sender)
+
         if self.io_loop is None:
             self.logger.error('Jaeger Reporter has no IOLoop')
         else:
@@ -120,14 +122,29 @@ class Reporter(NullReporter):
             self.flush_interval = flush_interval or None
             self.io_loop.spawn_callback(self._consume_queue)
 
-        self._process_lock = Lock()
-        self._process = None
+    @staticmethod
+    def _fetch_io_loop(channel, sender):
+        if channel:
+            return channel.io_loop
+        elif sender:
+            return sender.io_loop
+        return None
+
+    def _create_default_sender(self, channel, agent):
+        sender = UDPSender(
+            port=channel._reporting_port,
+            host=channel._host,
+            io_loop=channel.io_loop,
+            agent=agent
+        )
+        return sender
 
     def set_process(self, service_name, tags, max_length):
-        with self._process_lock:
-            self._process = thrift.make_process(
-                service_name=service_name, tags=tags, max_length=max_length,
-            )
+        self._sender.set_process(service_name, tags, max_length)
+
+    # method for protocol factory
+    def getProtocol(self, transport):
+        return self._sender.getProtocol(transport)
 
     def report_span(self, span):
         # We should not be calling `queue.put_nowait()` from random threads,
@@ -150,14 +167,14 @@ class Reporter(NullReporter):
 
     @tornado.gen.coroutine
     def _consume_queue(self):
-        spans = []
         stopped = False
+
         while not stopped:
-            while len(spans) < self.batch_size:
+            while self._sender.span_count < self.batch_size:
                 try:
                     # using timeout allows periodic flush with smaller packet
                     timeout = self.flush_interval + self.io_loop.time() \
-                        if self.flush_interval and spans else None
+                        if self.flush_interval and self._sender.span_count else None
                     span = yield self.queue.get(timeout=timeout)
                 except tornado.gen.TimeoutError:
                     break
@@ -168,52 +185,23 @@ class Reporter(NullReporter):
                         # don't return yet, submit accumulated spans first
                         break
                     else:
-                        spans.append(span)
-            if spans:
-                yield self._submit(spans)
-                for _ in spans:
+                        self._sender.append(span)
+
+            if self._sender.span_count:
+                num_spans = self._sender.span_count
+                try:
+                    yield self._sender.flush()
+                except Exception as exc:
+                    self.metrics.reporter_failure(num_spans)
+                    self.error_reporter.error(exc)
+                else:
+                    self.metrics.reporter_success(num_spans)
+
+                for _ in range(num_spans):
                     self.queue.task_done()
-                spans = spans[:0]
+
             self.metrics.reporter_queue_length(self.queue.qsize())
         self.logger.info('Span publisher exited')
-
-    # method for protocol factory
-    def getProtocol(self, transport):
-        """
-        Implements Thrift ProtocolFactory interface
-        :param: transport:
-        :return: Thrift compact protocol
-        """
-        return TCompactProtocol.TCompactProtocol(transport)
-
-    @tornado.gen.coroutine
-    def _submit(self, spans):
-        if not spans:
-            return
-        with self._process_lock:
-            process = self._process
-            if not process:
-                return
-        try:
-            batch = thrift.make_jaeger_batch(spans=spans, process=process)
-            yield self._send(batch)
-            self.metrics.reporter_success(len(spans))
-        except socket.error as e:
-            self.metrics.reporter_failure(len(spans))
-            self.error_reporter.error(
-                'Failed to submit traces to jaeger-agent socket: %s', e)
-        except Exception as e:
-            self.metrics.reporter_failure(len(spans))
-            self.error_reporter.error(
-                'Failed to submit traces to jaeger-agent: %s', e)
-
-    @tornado.gen.coroutine
-    def _send(self, batch):
-        """
-        Send batch of spans out via thrift transport. Any exceptions thrown
-        will be caught above in the exception handler of _submit().
-        """
-        return self.agent.emitBatch(batch)
 
     def close(self):
         """

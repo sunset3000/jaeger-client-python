@@ -96,7 +96,7 @@ def test_composite_reporter():
 
 class FakeSender(object):
     """
-    Mock the _send() method of the reporter by capturing requests
+    Mock the send() method of the reporter's Sender by capturing requests
     and returning incomplete futures that can be completed from
     inside the test.
     """
@@ -113,7 +113,7 @@ class FakeSender(object):
 
 
 class HardErrorReporter(object):
-    def error(self, name, count, *args):
+    def error(self, *args):
         raise ValueError(*args)
 
 
@@ -158,7 +158,7 @@ class ReporterTest(AsyncTestCase):
                             queue_capacity=queue_cap)
         reporter.set_process('service', {}, max_length=0)
         sender = FakeSender()
-        reporter._send = sender
+        reporter._sender.send = sender
         return reporter, sender
 
     @tornado.gen.coroutine
@@ -198,16 +198,11 @@ class ReporterTest(AsyncTestCase):
         reporter_failure_key = 'jaeger:reporter_spans.result_err'
         assert reporter_failure_key not in reporter.metrics_factory.counters
 
-        # simulate exception in send
-        reporter._send = mock.MagicMock(side_effect=ValueError())
+        reporter._sender.send = mock.MagicMock(side_effect=ValueError())
         reporter.report_span(self._new_span('1'))
-
         yield self._wait_for(
             lambda: reporter_failure_key in reporter.metrics_factory.counters)
         assert 1 == reporter.metrics_factory.counters.get(reporter_failure_key)
-
-        # silly test, for code coverage only
-        yield reporter._submit([])
 
     @gen_test
     def test_submit_queue_full_batch_size_1(self):
@@ -275,7 +270,7 @@ class ReporterTest(AsyncTestCase):
             count[0] += 1
             return future_result(True)
 
-        reporter._send = send
+        reporter._sender.send = send
         reporter.batch_size = 3
         for i in range(10):
             reporter.report_span(self._new_span('%s' % i))
@@ -291,3 +286,22 @@ class ReporterTest(AsyncTestCase):
         yield reporter.close()
         assert reporter.queue.qsize() == 0, 'all spans drained'
         assert count[0] == 4, 'last span submitted in one extrac batch'
+
+
+class TestReporterUnit:
+    @pytest.mark.parametrize(
+        'channel, sender, expected',
+        [
+            (None, None, None),
+            (None, type('X', (object,), {'io_loop': 'foo'}), 'foo'),
+            (type('X', (object,), {'io_loop': 'bar'}), None, 'bar'),
+            (
+                type('X', (object,), {'io_loop': 'bar'}),
+                type('X', (object,), {'io_loop': 'foo'}),
+                'bar'
+            ),
+        ]
+    )
+    def test_reporter_fetch_io_loop_works_as_expected(self, channel, sender, expected):
+        result = Reporter._fetch_io_loop(channel, sender)
+        assert expected == result

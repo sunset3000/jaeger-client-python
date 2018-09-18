@@ -91,6 +91,23 @@ def make_process(service_name, tags, max_length):
     )
 
 
+def make_jaeger_span(span):
+    jaeger_span = ttypes.Span(
+        traceIdLow=id_to_int(span.trace_id),
+        traceIdHigh=0,
+        spanId=id_to_int(span.span_id),
+        parentSpanId=id_to_int(span.parent_id) or 0,
+        operationName=span.operation_name,
+        # references = references, # TODO
+        flags=span.context.flags,
+        startTime=timestamp_micros(span.start_time),
+        duration=timestamp_micros(span.end_time - span.start_time),
+        tags=span.tags,  # TODO
+        logs=span.logs,  # TODO
+    )
+    return jaeger_span
+
+
 def make_jaeger_batch(spans, process):
     batch = ttypes.Batch(
         spans=[],
@@ -98,19 +115,7 @@ def make_jaeger_batch(spans, process):
     )
     for span in spans:
         with span.update_lock:
-            jaeger_span = ttypes.Span(
-                traceIdLow=id_to_int(span.trace_id),
-                traceIdHigh=0,
-                spanId=id_to_int(span.span_id),
-                parentSpanId=id_to_int(span.parent_id) or 0,
-                operationName=span.operation_name,
-                # references = references, # TODO
-                flags=span.context.flags,
-                startTime=timestamp_micros(span.start_time),
-                duration=timestamp_micros(span.end_time - span.start_time),
-                tags=span.tags,  # TODO
-                logs=span.logs,  # TODO
-            )
+            jaeger_span = make_jaeger_span(span)
         batch.spans.append(jaeger_span)
     return batch
 

@@ -76,3 +76,32 @@ def test_local_ip_does_not_blow_up():
     with mock.patch('socket.gethostbyname',
                     side_effect=[IOError(), '127.0.0.1']):
         jaeger_client.utils.local_ip()
+
+
+class CustomException(Exception):
+    pass
+
+
+def test_raise_with_value_reraises():
+    try:
+        raise CustomException("Initial Value")
+    except Exception as e:
+        try:
+            utils.raise_with_value(e, "New Value")
+        except Exception as e:
+            assert type(e) == CustomException
+            assert str(e) == "New Value"
+        else:
+            assert False, 'Failed to raise'
+    else:
+        assert False, 'Failed to raise'
+
+
+def test_raise_with_value_raises():
+    try:
+        utils.raise_with_value(CustomException, "Some Value")
+    except Exception as e:
+        assert type(e) == CustomException
+        assert str(e) == "Some Value"
+    else:
+        assert False, 'Failed to raise'

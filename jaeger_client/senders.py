@@ -16,7 +16,7 @@ from __future__ import absolute_import
 import socket
 import logging
 import tornado.gen
-import tornado.httpclient
+from tornado.httpclient import AsyncHTTPClient, HTTPRequest
 from threadloop import ThreadLoop
 
 from . import thrift
@@ -235,11 +235,11 @@ class HTTPSender(Sender):
             auth_args['auth_username'] = self.user
             auth_args['auth_password'] = self.password
 
-        client = tornado.httpclient.AsyncHTTPClient()
+        client = AsyncHTTPClient()
         body = serialize(batch)
         headers['Content-Length'] = str(len(body))
 
-        request = tornado.httpclient.HTTPRequest(
+        request = HTTPRequest(
             method='POST',
             url=self.url,
             headers=headers,

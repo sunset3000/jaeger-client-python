@@ -23,7 +23,7 @@ from . import thrift
 from .utils import raise_with_value
 from .local_agent_net import LocalAgentSender
 from thrift.TSerialization import serialize
-from thrift.protocol import TCompactProtocol
+from thrift.protocol import TBinaryProtocol, TCompactProtocol
 from thrift.transport import TTransport
 
 from jaeger_client.thrift_gen.agent import Agent
@@ -138,7 +138,7 @@ class UDPSender(Sender):
             raise_with_value(e, 'Failed to submit traces to jaeger-agent: {}'.format(e))
 
     @tornado.gen.coroutine
-    def _flush(self, spans, process):
+    def _batch_and_send(self, spans, process):
         """
         Batches and sends spans in as many UDP packets as necessary.  Will drop any span with size
         greater than allowable relative to minimum batch size and maximum UDP payload.
@@ -169,6 +169,8 @@ class UDPSender(Sender):
 
         if flush_error is not None:
             raise flush_error
+
+        raise tornado.gen.Return(len(batched_spans))
 
     def _calculate_base_batch_size(self, process):
         """Determine what size the batch will be without any spans"""
@@ -257,3 +259,12 @@ class HTTPSender(Sender):
             raise
         except Exception as e:
             raise_with_value(e, 'POST to jaeger_endpoint failed: {}'.format(e))
+
+    # method for protocol factory
+    def getProtocol(self, transport):
+        """
+        Implements Thrift ProtocolFactory interface
+        :param: transport:
+        :return: Thrift compact protocol
+        """
+        return TBinaryProtocol.TBinaryProtocol(transport)

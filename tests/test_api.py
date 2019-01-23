@@ -36,4 +36,4 @@ class APITest(unittest.TestCase, APICompatibilityCheckMixin):
         pass
 
     def is_parent(self, parent, span):
-        return span.parent_id == getattr(parent, "span_id", None)
+        return span.parent_id == getattr(parent, 'span_id', None)

@@ -189,7 +189,7 @@ class ConfigTests(unittest.TestCase):
     def test_jaeger_user_and_password(self):
         c = Config({'jaeger_user': 'some_user',
                     'jaeger_password': 'some_password'},
-                    service_name='x', validate=True)
+                   service_name='x', validate=True)
         assert c.jaeger_user == 'some_user'
         assert c.jaeger_password == 'some_password'
         os.environ['JAEGER_USER'] = 'SomeUser'
@@ -202,10 +202,10 @@ class ConfigTests(unittest.TestCase):
 
     def test_jaeger_auth_token_and_basic_mutually_exclusive(self):
         with self.assertRaises(ValueError) as e:
-            c = Config({'jaeger_auth_token': 'some_token',
-                        'jaeger_user': 'some_user',
-                        'jaeger_password': 'some_password'},
-                        service_name='x', validate=True)
+            Config({'jaeger_auth_token': 'some_token',
+                    'jaeger_user': 'some_user',
+                    'jaeger_password': 'some_password'},
+                   service_name='x', validate=True)
         assert e.exception.args[0] == ('Cannot accept both jaeger_auth_token and '
                                        'jaeger_user/jaeger_password for authentication')
 

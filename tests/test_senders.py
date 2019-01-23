@@ -74,8 +74,15 @@ class CustomException(Exception):
 class SenderFlushTest(AsyncTestCase):
 
     def span(self):
-        FakeTracer = collections.namedtuple('FakeTracer', ['ip_address', 'service_name', 'max_tag_value_length'])
-        tracer = FakeTracer(ip_address='127.0.0.1', service_name='reporter_test', max_tag_value_length=sys.maxsize)
+        FakeTracer = collections.namedtuple(
+            'FakeTracer',
+            ['ip_address', 'service_name', 'max_tag_value_length']
+        )
+        tracer = FakeTracer(
+            ip_address='127.0.0.1',
+            service_name='reporter_test',
+            max_tag_value_length=sys.maxsize
+        )
         ctx = SpanContext(trace_id=1, span_id=1, parent_id=None, flags=1)
         span = Span(context=ctx, tracer=tracer, operation_name='foo')
         span.start_time = time.time()
@@ -139,6 +146,7 @@ class SenderFlushTest(AsyncTestCase):
         sender.spans = [span_to_send, span_to_filter]
 
         batch_store = []
+
         def mock_emit_batch(batch):
             batch_store.append(batch)
 
@@ -165,6 +173,7 @@ class SenderFlushTest(AsyncTestCase):
         sender.spans = list(spans)
 
         batch_store = []
+
         def mock_emit_batch(batch):
             batch_store.append(batch)
 
@@ -175,7 +184,9 @@ class SenderFlushTest(AsyncTestCase):
         assert len(batch_store) == 10
         c = 0
         for i in range(10):
-            assert batch_store[i].spans == [thrift.make_jaeger_span(span) for span in spans[c:c+6]]
+            assert batch_store[i].spans == [
+                thrift.make_jaeger_span(span) for span in spans[c:c + 6]
+            ]
             c += 6
 
 
@@ -278,7 +289,7 @@ class HTTPSenderTest(AsyncTestCase):
 
         for exception, expected_value in exceptions:
             sender = self.loaded_sender('some_endpoint')
-            
+
             def mock_fetch(*args):
                 raise exception
 

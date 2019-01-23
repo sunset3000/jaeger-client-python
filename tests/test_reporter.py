@@ -198,7 +198,7 @@ class ReporterTest(AsyncTestCase):
     def test_sender_flushed_with_partial_batch(self):
         reporter, sender = self._new_reporter(batch_size=100, flush=.5)
         for i in range(50):
-            reporter.report_span(self._new_span(i))
+            reporter.report_span(self._new_span(str(i)))
 
         yield self._wait_for(lambda: len(sender.futures) > 0)
         assert 1 == len(sender.futures)
@@ -215,7 +215,7 @@ class ReporterTest(AsyncTestCase):
             metrics=Metrics(), logger=logging.getLogger())
         reporter._sender.send = mock.MagicMock(side_effect=ValueError())
         for i in range(50):
-            reporter.report_span(self._new_span(i))
+            reporter.report_span(self._new_span(str(i)))
 
         reporter_failure_key = 'jaeger:reporter_spans.result_err'
         yield self._wait_for(lambda: reporter_failure_key in reporter.metrics_factory.counters)
@@ -327,20 +327,3 @@ class TestReporterUnit:
         sender = mock.MagicMock()
         reporter = Reporter(channel=channel, sender=sender)
         assert reporter.io_loop == sender._io_loop, "Reporter didn't set its io_loop from Sender's"
-
-    @pytest.mark.parametrize(
-        'channel, sender, expected',
-        [
-            (None, None, None),
-            (None, type('X', (object,), {'io_loop': 'foo'}), 'foo'),
-            (type('X', (object,), {'io_loop': 'bar'}), None, 'bar'),
-            (
-                type('X', (object,), {'io_loop': 'bar'}),
-                type('X', (object,), {'io_loop': 'foo'}),
-                'bar'
-            ),
-        ]
-    )
-    def test_reporter_fetch_io_loop_works_as_expected(self, channel, sender, expected):
-        result = Reporter._fetch_io_loop(channel, sender)
-        assert expected == result

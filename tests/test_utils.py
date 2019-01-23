@@ -89,13 +89,13 @@ class CustomException(Exception):
 
 def test_raise_with_value_reraises():
     try:
-        raise CustomException("Initial Value")
+        raise CustomException('Initial Value')
     except Exception as e:
         try:
-            utils.raise_with_value(e, "New Value")
+            utils.raise_with_value(e, 'New Value')
         except Exception as e:
             assert type(e) == CustomException
-            assert str(e) == "New Value"
+            assert str(e) == 'New Value'
         else:
             assert False, 'Failed to raise'
     else:
@@ -104,9 +104,9 @@ def test_raise_with_value_reraises():
 
 def test_raise_with_value_raises():
     try:
-        utils.raise_with_value(CustomException, "Some Value")
+        utils.raise_with_value(CustomException, 'Some Value')
     except Exception as e:
         assert type(e) == CustomException
-        assert str(e) == "Some Value"
+        assert str(e) == 'Some Value'
     else:
         assert False, 'Failed to raise'

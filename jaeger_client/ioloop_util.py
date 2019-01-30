@@ -14,59 +14,64 @@
 
 from __future__ import absolute_import
 
-import sys
-from tornado import gen
-from tornado.concurrent import Future
+import threading
+import time
 
 
-def submit(fn, io_loop, *args, **kwargs):
-    """Submit Tornado Coroutine to IOLoop.current().
-
-    :param fn: Tornado Coroutine to execute
-    :param io_loop: Tornado IOLoop where to schedule the coroutine
-    :param args: Args to pass to coroutine
-    :param kwargs: Kwargs to pass to coroutine
-    :returns tornado.concurrent.Future: future result of coroutine
+class PeriodicCallback(object):
     """
-    future = Future()
+    Thread-based implementation of tornado.io_loop.PeriodicCallback:
+    Schedules the given callback to be called periodically in a background thread.
 
-    def execute():
-        """Execute fn on the IOLoop."""
-        try:
-            result = gen.maybe_future(fn(*args, **kwargs))
-        except Exception:
-            # The function we ran didn't return a future and instead raised
-            # an exception. Let's pretend that it returned this dummy
-            # future with our stack trace.
-            f = gen.Future()
-            f.set_exc_info(sys.exc_info())
-            on_done(f)
-        else:
-            result.add_done_callback(on_done)
+    The callback is called every ``callback_time`` milliseconds.
 
-    def on_done(tornado_future):
-        """
-        Set tornado.Future results to the concurrent.Future.
-        :param tornado_future:
-        """
-        exception = tornado_future.exception()
-        if not exception:
-            future.set_result(tornado_future.result())
-        else:
-            future.set_exception(exception)
+    If the callback runs for longer than ``callback_time`` milliseconds,
+    subsequent invocations will be skipped.
 
-    io_loop.add_callback(execute)
+    `start` must be called after the `PeriodicCallback` is created.
+    """
 
-    return future
+    def __init__(self, callback, callback_time):
+        self.callback = callback
+        if callback_time <= 0:
+            raise ValueError('callback_time must be positive')
+        self.callback_time = callback_time
+        self._scheduler_sleep = callback_time / 1000.0
+        self._running = False
+        self._timeout = None
+        self._lock = threading.Lock()
+        self._scheduler_thread = None
+        self._callback_thread = None
 
+    def start(self):
+        with self._lock:
+            if self._running:
+                return
 
-def future_result(result):
-    future = Future()
-    future.set_result(result)
-    return future
+            if self._scheduler_thread is None:
+                self._scheduler_thread = threading.Thread(target=self._scheduler)
+                self._scheduler_thread.start()
 
+            self._running = True
 
-def future_exception(exception):
-    future = Future()
-    future.set_exception(exception)
-    return future
+    def stop(self):
+        with self._lock:
+            if self._running:
+                self._running = False
+
+            if self._scheduler_thread is not None:
+                self._scheduler_thread.join()
+            if self._callback_thread is not None:
+                self._callback_thread.join()
+
+    def _scheduler(self):
+        while self._running:
+            if self._callback_thread:
+                if not self._callback_thread.is_alive():
+                    self._callback_thread.join()
+                    self._callback_thread = None
+            if self._callback_thread is None:
+                self._callback_thread = threading.Thread(target=self.callback)
+                self._callback_thread.start()
+
+            time.sleep(self._scheduler_sleep)

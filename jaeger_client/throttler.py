@@ -13,13 +13,13 @@
 # limitations under the License.
 
 from __future__ import absolute_import, division
-import json
+
 import logging
 import random
-from threading import Lock
+import time
+from threading import Lock, Thread
 
-from tornado.ioloop import PeriodicCallback
-
+from .ioloop_util import PeriodicCallback
 from .constants import DEFAULT_THROTTLER_REFRESH_INTERVAL
 from .metrics import Metrics, MetricsFactory
 from .utils import ErrorReporter
@@ -54,18 +54,22 @@ class RemoteThrottler(object):
         self.metrics = ThrottlerMetrics(metrics_factory)
         self.error_reporter = kwargs.get('error_reporter', ErrorReporter(Metrics()))
         self.credits = {}
-        self.lock = Lock()
+        self._credit_lock = Lock()
+        self._polling_lock = Lock()
         self.running = True
         self.periodic = None
-
-        if not self.channel.io_loop:
-            self.logger.error(
-                'Cannot acquire IOLoop, throttler will not be updated')
-        else:
-            self.channel.io_loop.add_callback(self._init_polling)
+        self._init_polling_thread = None
+        self._polling_initialized = False
 
     def is_allowed(self, operation):
-        with self.lock:
+        if not self._polling_initialized:
+            with self._polling_lock:
+                if self.running and self._init_polling_thread is None:
+                    self._init_polling_thread = Thread(target=self._init_polling)
+                    self._init_polling_thread.start()
+                self._polling_initialized = True
+
+        with self._credit_lock:
             if operation not in self.credits:
                 self.credits[operation] = 0.0
                 self.metrics.throttled_debug_spans(1)
@@ -82,7 +86,7 @@ class RemoteThrottler(object):
         """
         Method for tracer to set client ID of throttler.
         """
-        with self.lock:
+        with self._credit_lock:
             if self.client_id is None:
                 self.client_id = client_id
 
@@ -93,19 +97,18 @@ class RemoteThrottler(object):
         To avoid spiky traffic from throttler clients, we use a random delay
         before the first poll.
         """
-        with self.lock:
-            if not self.running:
-                return
+        if not self.running:
+            return
 
-            r = random.Random()
-            delay = r.random() * self.refresh_interval
-            self.channel.io_loop.call_later(
-                delay=delay, callback=self._delayed_polling)
-            self.logger.info(
-                'Delaying throttling credit polling by %d sec', delay)
+        r = random.Random()
+        delay = r.random() * self.refresh_interval / 1000.0
+        self.logger.info(
+            'Delaying throttling credit polling by %d sec', delay)
+        time.sleep(delay)
+        self._delayed_polling()
 
     def _operations(self):
-        with self.lock:
+        with self._credit_lock:
             return self.credits.keys()
 
     def _delayed_polling(self):
@@ -115,28 +118,31 @@ class RemoteThrottler(object):
         periodic = PeriodicCallback(
             callback=callback,
             # convert interval to milliseconds
-            callback_time=self.refresh_interval * 1000,
-            io_loop=self.channel.io_loop)
+            callback_time=self.refresh_interval * 1000
+        )
         self._fetch_credits(self._operations())
-        with self.lock:
-            if not self.running:
-                return
-            self.periodic = periodic
-            self.periodic.start()
-            self.logger.info(
-                'Throttling client started with refresh interval %d sec',
-                self.refresh_interval)
+        if not self.running:
+            return
+        self.periodic = periodic
+        self.periodic.start()
+        self.logger.info(
+            'Throttling client started with refresh interval %d sec',
+            self.refresh_interval)
 
     def _fetch_credits(self, operations):
         if not operations:
             return
         self.logger.debug('Requesting throttling credits')
-        fut = self.channel.request_throttling_credits(
-            self.service_name, self.client_id, operations)
-        fut.add_done_callback(self._request_callback)
+        throttling_response = None
+        exception = None
+        try:
+            throttling_response = self.channel.request_throttling_credits(
+                self.service_name, self.client_id, operations)
+        except Exception as exc:
+            exception = exc
+        self._request_callback(throttling_response, exception)
 
-    def _request_callback(self, future):
-        exception = future.exception()
+    def _request_callback(self, response, exception):
         if exception:
             self.metrics.throttler_update_failure(1)
             self.error_reporter.error(
@@ -144,16 +150,8 @@ class RemoteThrottler(object):
                 exception)
             return
 
-        response = future.result()
-        # In Python 3.5 response.body is of type bytes and json.loads() does only support str
-        # See: https://github.com/jaegertracing/jaeger-client-python/issues/180
-        if hasattr(response.body, 'decode') and callable(response.body.decode):
-            response_body = response.body.decode('utf-8')
-        else:
-            response_body = response.body
-
         try:
-            throttling_response = json.loads(response_body)
+            throttling_response = response.json()
             self.logger.debug('Received throttling response: %s',
                               throttling_response)
             self._update_credits(throttling_response)
@@ -162,11 +160,11 @@ class RemoteThrottler(object):
             self.metrics.throttler_update_failure(1)
             self.error_reporter.error(
                 'Failed to parse throttling credits response '
-                'from jaeger-agent: %s [%s]', e, response_body)
+                'from jaeger-agent: %s [%s]', e, response.content)
             return
 
     def _update_credits(self, response):
-        with self.lock:
+        with self._credit_lock:
             for op_balance in response['balances']:
                 op = op_balance['operation']
                 balance = op_balance['balance']
@@ -176,10 +174,17 @@ class RemoteThrottler(object):
             self.logger.debug('credits = %s', self.credits)
 
     def close(self):
-        with self.lock:
-            self.running = False
-            if self.periodic:
+        self.running = False
+        if not self._polling_initialized:
+            return
+        with self._polling_lock:
+            if self.periodic is not None:
                 self.periodic.stop()
+                self.periodic = None
+            if self._init_polling_thread is not None:
+                self._init_polling_thread.join()
+                self._init_polling_thread = None
+            self._polling_initialized = False
 
 
 class ThrottlerMetrics(object):

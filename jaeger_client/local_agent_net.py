@@ -14,11 +14,7 @@
 
 from __future__ import absolute_import
 
-from threadloop import ThreadLoop
-import tornado
-import tornado.httpclient
-from tornado.concurrent import Future
-from tornado.httputil import url_concat
+from requests import Session
 from .TUDPTransport import TUDPTransport
 from thrift.transport.TTransport import TBufferedTransport
 
@@ -30,14 +26,11 @@ class LocalAgentHTTP(object):
     def __init__(self, host, port):
         self.agent_http_host = host
         self.agent_http_port = int(port)
+        self._http_client = Session()
 
     def _request(self, path, timeout=DEFAULT_TIMEOUT, args=None):
-        http_client = tornado.httpclient.AsyncHTTPClient(
-            defaults=dict(request_timeout=timeout))
         url = 'http://%s:%d/%s' % (self.agent_http_host, self.agent_http_port, path)
-        if args:
-            url = url_concat(url, args)
-        return http_client.fetch(url)
+        return self._http_client.get(url, timeout=timeout, params=args)
 
     def request_sampling_strategy(self, service_name, timeout=DEFAULT_TIMEOUT):
         return self._request('sampling', timeout=timeout, args={'service': service_name})
@@ -56,15 +49,10 @@ class LocalAgentHTTP(object):
 class LocalAgentReader(object):
     """
     LocalAgentReader implements what is necessary to obtain sampling strategies
-    and throttling credits from the local jaeger-agent.  This class is designed
-    to work in tornado and non-tornado environments. If in torndado, pass in the
-    ioloop, if not then LocalAgentSender will create one for itself.
+    and throttling credits from the local jaeger-agent.
     """
 
-    def __init__(self, host, sampling_port, reporting_port, io_loop=None, throttling_port=None):
-        # IOLoop
-        self._thread_loop = None
-        self.io_loop = io_loop or self._create_new_thread_loop()
+    def __init__(self, host, sampling_port, reporting_port, throttling_port=None):
         self._reporting_port = reporting_port
         self._host = host
 
@@ -74,20 +62,6 @@ class LocalAgentReader(object):
         # HTTP throttling
         if throttling_port:
             self.throttling_http = LocalAgentHTTP(host, throttling_port)
-
-    def _create_new_thread_loop(self):
-        """
-        Create a daemonized thread that will run Tornado IOLoop.
-        :return: the IOLoop backed by the new thread.
-        """
-        self._thread_loop = ThreadLoop()
-        if not self._thread_loop.is_ready():
-            self._thread_loop.start()
-        return self._thread_loop._io_loop
-
-    def readFrame(self):
-        """Empty read frame that is never ready"""
-        return Future()
 
     # Pass-through for HTTP sampling strategies request.
     def request_sampling_strategy(self, *args, **kwargs):
@@ -107,9 +81,8 @@ class LocalAgentSender(LocalAgentReader, TBufferedTransport):
     up all written data until flush() is called. Flush gets called at the
     end of the batch span submission call.
     """
-    def __init__(self, host, sampling_port, reporting_port, io_loop=None, throttling_port=None):
-        LocalAgentReader.__init__(self, host, sampling_port, reporting_port,
-                                  io_loop, throttling_port)
+    def __init__(self, host, sampling_port, reporting_port, throttling_port=None):
+        LocalAgentReader.__init__(self, host, sampling_port, reporting_port, throttling_port)
         # UDP reporting - this will only get written to after our flush() call.
         # We are buffering things up because we are a TBufferedTransport.
         udp = TUDPTransport(host, reporting_port)

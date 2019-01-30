@@ -14,19 +14,16 @@
 
 from __future__ import absolute_import
 
+import time
 import logging
 import threading
 
-import tornado.gen
-import tornado.ioloop
-import tornado.queues
-from tornado.concurrent import Future
 from .constants import DEFAULT_FLUSH_INTERVAL
-from . import ioloop_util
 from .metrics import Metrics, LegacyMetricsFactory
 from jaeger_client.thrift_gen.agent import Agent
 from .senders import UDPSender
 from .utils import ErrorReporter
+from six.moves import queue
 
 
 default_logger = logging.getLogger('jaeger_tracing')
@@ -41,9 +38,7 @@ class NullReporter(object):
         pass
 
     def close(self):
-        fut = Future()
-        fut.set_result(True)
-        return fut
+        return True
 
 
 class InMemoryReporter(NullReporter):
@@ -74,17 +69,14 @@ class LoggingReporter(NullReporter):
 class Reporter(NullReporter):
     """Receives completed spans from Tracer and submits them out of process."""
     def __init__(self, channel, queue_capacity=100, batch_size=10,
-                 flush_interval=DEFAULT_FLUSH_INTERVAL, io_loop=None,
-                 error_reporter=None, metrics=None, metrics_factory=None,
-                 sender=None, **kwargs):
+                 flush_interval=DEFAULT_FLUSH_INTERVAL, error_reporter=None,
+                 metrics=None, metrics_factory=None, sender=None, **kwargs):
         """
         :param channel: a communication channel to jaeger-agent
         :param queue_capacity: how many spans we can hold in memory before
             starting to drop spans
         :param batch_size: how many spans we can submit at once to Collector
         :param flush_interval: how often the auto-flush is called (in seconds)
-        :param io_loop: which IOLoop to use. If None, try to get it from
-            channel (only works if channel is tchannel.sync)
         :param error_reporter:
         :param metrics: an instance of Metrics class, or None. This parameter
             has been deprecated, please use metrics_factory instead.
@@ -102,7 +94,6 @@ class Reporter(NullReporter):
         self._sender = sender or UDPSender(
             port=channel._reporting_port,
             host=channel._host,
-            io_loop=channel.io_loop,
             agent=self.agent,
             batch_size=batch_size
         )
@@ -116,17 +107,12 @@ class Reporter(NullReporter):
         if queue_capacity < batch_size:
             raise ValueError('Queue capacity cannot be less than batch size')
 
-        if io_loop:
-            self.io_loop = io_loop
-        else:
-            self.io_loop = self._sender._io_loop
-
-        self.queue = tornado.queues.Queue(maxsize=queue_capacity)
+        self.queue = queue.Queue(maxsize=queue_capacity)
         self.stop = object()  # sentinel
         self.stopped = False
         self.stop_lock = Lock()
         self.flush_interval = flush_interval or None
-        self.io_loop.spawn_callback(self._consume_queue)
+        self._consume_queue_thread = None
 
     def set_process(self, service_name, tags, max_length):
         self._sender.set_process(service_name, tags, max_length)
@@ -136,14 +122,16 @@ class Reporter(NullReporter):
         return self._sender.getProtocol(transport)
 
     def report_span(self, span):
-        # We should not be calling `queue.put_nowait()` from random threads,
-        # only from the same IOLoop where the queue is consumed (T333431).
-        if tornado.ioloop.IOLoop.current(instance=False) == self.io_loop:
-            self._report_span_from_ioloop(span)
-        else:
-            self.io_loop.add_callback(self._report_span_from_ioloop, span)
+        """
+        Add a finished span to the queue, creating a `self._consume_queue()` worker thread
+        if none exists.  This deferred creation of the consumer thread allows for easy adoption
+        in forking environments (e.g. Django) where background threads shouldn't be spawned
+        until the application is actively traced.
+        """
+        if self._consume_queue_thread is None:
+            self._consume_queue_thread = threading.Thread(target=self._consume_queue)
+            self._consume_queue_thread.start()
 
-    def _report_span_from_ioloop(self, span):
         try:
             with self.stop_lock:
                 stopped = self.stopped
@@ -151,22 +139,21 @@ class Reporter(NullReporter):
                 self.metrics.reporter_dropped(1)
             else:
                 self.queue.put_nowait(span)
-        except tornado.queues.QueueFull:
+        except queue.Full:
             self.metrics.reporter_dropped(1)
 
-    @tornado.gen.coroutine
     def _consume_queue(self):
         stopped = False
         while not stopped:
             interval = self.flush_interval
             spans_appended = 0
             while True:
-                t0 = self.io_loop.time()
-                timeout = interval + t0 if self.flush_interval else None
+                t0 = time.time()
+                timeout = interval if self.flush_interval else None
                 try:
-                    span = yield self.queue.get(timeout=timeout)
-                    t1 = self.io_loop.time()
-                except tornado.gen.TimeoutError:
+                    span = self.queue.get(timeout=timeout)
+                    t1 = time.time()
+                except queue.Empty:
                     # Always flush on timeouts, as they signify interval completion
                     break
 
@@ -177,7 +164,7 @@ class Reporter(NullReporter):
 
                 spans_appended += 1
                 try:
-                    spans_reported = yield self._sender.append(span)
+                    spans_reported = self._sender.append(span)
                 except Exception as exc:
                     # Assume append() triggered flush(), which failed and
                     # included all previously appended spans
@@ -197,7 +184,7 @@ class Reporter(NullReporter):
                     interval -= t1 - t0
 
             try:
-                spans_reported = yield self._sender.flush()
+                spans_reported = self._sender.flush()
             except Exception as exc:
                 # Assume number of failed spans is equal to previously appended
                 self.metrics.reporter_failure(spans_appended)
@@ -215,17 +202,18 @@ class Reporter(NullReporter):
     def close(self):
         """
         Ensure that all spans from the queue are submitted.
-        Returns Future that will be completed once the queue is empty.
         """
         with self.stop_lock:
             self.stopped = True
+        if self._consume_queue_thread is not None:
+            # Do not submit poison pill unless worker is guaranteed
+            # to consume or subsequent join will hang
+            if self._consume_queue_thread.is_alive():
+                self.queue.put(self.stop)
+            self.queue.join()
+            self._consume_queue_thread.join()
 
-        return ioloop_util.submit(self._flush, io_loop=self.io_loop)
-
-    @tornado.gen.coroutine
-    def _flush(self):
-        yield self.queue.put(self.stop)
-        yield self.queue.join()
+        return True
 
 
 class ReporterMetrics(object):
@@ -256,19 +244,5 @@ class CompositeReporter(NullReporter):
             reporter.report_span(span)
 
     def close(self):
-        from threading import Lock
-        lock = Lock()
-        count = [0]
-        future = Future()
-
-        def on_close(_):
-            with lock:
-                count[0] += 1
-                if count[0] == len(self.reporters):
-                    future.set_result(True)
-
-        for reporter in self.reporters:
-            f = reporter.close()
-            f.add_done_callback(on_close)
-
-        return future
+        closed = [reporter.close() for reporter in self.reporters]
+        return all(closed)

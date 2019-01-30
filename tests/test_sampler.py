@@ -11,13 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 from __future__ import division
-from six.moves import range
-import time
+
 import math
-import mock
+import time
+
+from six.moves import range
+from six import PY3
+import requests
 import pytest
+import mock
 
 from jaeger_client.sampler import (
     Sampler,
@@ -355,11 +358,11 @@ def test_remotely_controlled_sampler():
     sampled, tags = sampler.is_sampled(1)
     assert sampled
     assert tags == get_tags('probabilistic', DEFAULT_SAMPLING_PROBABILITY)
+    sampler.close()
 
     init_sampler = mock.MagicMock()
     init_sampler.is_sampled = mock.MagicMock()
     channel = mock.MagicMock()
-    channel.io_loop = None
     sampler = RemoteControlledSampler(
         channel=channel,
         service_name='x',
@@ -371,12 +374,10 @@ def test_remotely_controlled_sampler():
     sampler.is_sampled(1)
     assert init_sampler.is_sampled.call_count == 2
 
-    sampler.io_loop = mock.MagicMock()
+    sampler._create_periodic_callback = mock.MagicMock()
     # noinspection PyProtectedMember
     sampler._init_polling()
-    assert sampler.io_loop.call_later.call_count == 1
 
-    sampler._create_periodic_callback = mock.MagicMock()
     # noinspection PyProtectedMember
     sampler._delayed_polling()
     sampler.close()
@@ -396,10 +397,23 @@ def test_remotely_controlled_sampler():
     assert not sampler.running
 
 
+class MockResponse(requests.Response):
+    """
+    Helps determine whether sampling strategies are successfully parsed by requests
+    and any errors are properly handled.
+    """
+    def __init__(self, content):
+        super(MockResponse, self).__init__()
+        self._content = content
+        if PY3:
+            self.encoding = 'UTF-8'
+            if not isinstance(content, (bytearray, bytes, type(None))):
+                self._content = bytes(content, 'utf-8')
+
+
 # noinspection PyProtectedMember
 def test_sampling_request_callback():
     channel = mock.MagicMock()
-    channel.io_loop = mock.MagicMock()
     error_reporter = mock.MagicMock()
     error_reporter.error = mock.MagicMock()
     sampler = RemoteControlledSampler(
@@ -408,9 +422,6 @@ def test_sampling_request_callback():
         error_reporter=error_reporter,
         max_operations=10,
     )
-
-    return_value = mock.MagicMock()
-    return_value.exception = lambda *args: False
 
     probabilistic_strategy = """
     {
@@ -421,15 +432,13 @@ def test_sampling_request_callback():
         }
     }
     """
-
-    return_value.result = lambda *args: \
-        type('obj', (object,), {'body': probabilistic_strategy})()
-    sampler._sampling_request_callback(return_value)
+    response = MockResponse(probabilistic_strategy)
+    sampler._sampling_request_callback(response, None)
     assert '%s' % sampler.sampler == \
            'ProbabilisticSampler(0.002)', 'sampler should have changed to probabilistic'
     prev_sampler = sampler.sampler
 
-    sampler._sampling_request_callback(return_value)
+    sampler._sampling_request_callback(response, None)
     assert prev_sampler is sampler.sampler, \
         "strategy hasn't changed so sampler should not change"
 
@@ -452,62 +461,45 @@ def test_sampling_request_callback():
         }
     }
     """
-    return_value.result = lambda *args: \
-        type('obj', (object,), {'body': adaptive_sampling_strategy})()
-    sampler._sampling_request_callback(return_value)
+    response = MockResponse(adaptive_sampling_strategy)
+    sampler._sampling_request_callback(response, None)
     assert '%s' % sampler.sampler == 'AdaptiveSampler(0.001000, 2.000000, 10)', \
         'sampler should have changed to adaptive'
     prev_sampler = sampler.sampler
 
-    sampler._sampling_request_callback(return_value)
+    sampler._sampling_request_callback(response, None)
     assert prev_sampler is sampler.sampler, "strategy hasn't changed so sampler should not change"
 
-    probabilistic_strategy_bytes = probabilistic_strategy.encode('utf-8')
-
-    return_value.result = lambda *args: \
-        type('obj', (object,), {'body': probabilistic_strategy_bytes})()
-    sampler._sampling_request_callback(return_value)
+    response = MockResponse(probabilistic_strategy.encode('utf-8'))
+    sampler._sampling_request_callback(response, None)
     assert '%s' % sampler.sampler == \
            'ProbabilisticSampler(0.002)', 'sampler should have changed to probabilistic'
 
-    adaptive_sampling_strategy_bytearray = bytearray(adaptive_sampling_strategy.encode('utf-8'))
-
-    return_value.result = lambda *args: \
-        type('obj', (object,), {'body': adaptive_sampling_strategy_bytearray})()
-    sampler._sampling_request_callback(return_value)
+    response = MockResponse(bytearray(adaptive_sampling_strategy.encode('utf-8')))
+    sampler._sampling_request_callback(response, None)
     assert '%s' % sampler.sampler == 'AdaptiveSampler(0.001000, 2.000000, 10)', \
         'sampler should have changed to adaptive'
     prev_sampler = sampler.sampler
 
-    return_value.exception = lambda *args: True
-    sampler._sampling_request_callback(return_value)
+    sampler._sampling_request_callback(response, Exception())
     assert error_reporter.error.call_count == 1
     assert prev_sampler is sampler.sampler, 'error fetching strategy should not update the sampler'
 
-    return_value.exception = lambda *args: False
-    return_value.result = lambda *args: type('obj', (object,), {'body': 'bad_json'})()
-
-    sampler._sampling_request_callback(return_value)
+    response = MockResponse('bad_json')
+    sampler._sampling_request_callback(response, None)
     assert error_reporter.error.call_count == 2
     assert prev_sampler is sampler.sampler, 'error updating sampler should not update the sampler'
 
-    return_value.result = lambda *args: \
-        type('obj', (object,), {'body': None})()
-    sampler._sampling_request_callback(return_value)
+    response = MockResponse(None)
+    sampler._sampling_request_callback(response, None)
     assert error_reporter.error.call_count == 3
     assert prev_sampler is sampler.sampler, 'error updating sampler should not update the sampler'
 
-    return_value.result = lambda *args: \
-        type('obj', (object,), {'body': {'decode': None}})()
-    sampler._sampling_request_callback(return_value)
-    assert error_reporter.error.call_count == 4
-    assert prev_sampler is sampler.sampler, 'error updating sampler should not update the sampler'
-
-    return_value.result = lambda *args: \
-        type('obj', (object,), {'body': probabilistic_strategy})()
-    sampler._sampling_request_callback(return_value)
+    response = MockResponse(probabilistic_strategy)
+    sampler._sampling_request_callback(response, None)
     assert '%s' % sampler.sampler == 'ProbabilisticSampler(0.002)', \
         'updating sampler from adaptive to probabilistic should work'
+    assert error_reporter.error.call_count == 3
 
     sampler.close()
 

@@ -38,6 +38,7 @@ setup(
     ],
     install_requires=[
         'thrift',
+        'requests',
         'opentracing>=2.0,<3.0',
     ],
     # Uncomment below if need to test with unreleased version of opentracing
@@ -56,10 +57,12 @@ setup(
             'pytest>=3.7.0,<3.8.0',
             'pytest-cov==2.5.1',
             'coverage<4.4',  # can remove after https://bitbucket.org/ned/coveragepy/issues/581/44b1-44-breaking-in-ci
+            'flask',
             'pytest-timeout==1.3.1',
             # pin <3.2 as otherwise it requires pytest>=3.8
             'pytest-benchmark[histogram]>=3.0.0rc1,<3.2',
             'pytest-localserver',
+            'pytest-tornado',  # needed for tchannel/crossdock
             'flake8',
             'flake8-quotes',
             'codecov',

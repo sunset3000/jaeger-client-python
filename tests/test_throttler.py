@@ -11,59 +11,49 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import json
 import mock
-import time
+
+import pytest
 
 from jaeger_client.throttler import RemoteThrottler
 
 
-def test_throttler_simple():
+@pytest.fixture
+def throttler():
     channel = mock.MagicMock()
     throttler = RemoteThrottler(channel, 'test-service')
+    yield throttler
+    throttler.close()
+
+
+def test_throttler_simple(throttler):
     allowed = throttler.is_allowed('test-operation')
     assert not allowed
     allowed = throttler.is_allowed('test-operation')
     assert not allowed
 
 
-def test_throttler_no_io_loop():
-    channel = mock.MagicMock()
-    channel.io_loop = None
-    throttler = RemoteThrottler(channel, 'test-service')
-    assert throttler
-
-
-def test_throttler_credits():
-    channel = mock.MagicMock()
-    throttler = RemoteThrottler(channel, 'test-service')
+def test_throttler_credits(throttler):
     throttler.credits['test-operation'] = 3.0
     allowed = throttler.is_allowed('test-operation')
     assert allowed
     assert throttler.credits['test-operation'] == 2.0
 
 
-def test_throttler_init_polling():
-    channel = mock.MagicMock()
-    throttler = RemoteThrottler(channel, 'test-service')
+def test_throttler_init_polling(throttler):
     # noinspection PyProtectedMember
     throttler._init_polling()
-    assert channel.io_loop.call_later.call_count == 1
     throttler.close()
     # noinspection PyProtectedMember
     throttler._init_polling()
-    assert channel.io_loop.call_later.call_count == 1
 
 
-def test_throttler_delayed_polling():
-    channel = mock.MagicMock()
-    channel.io_loop.time = time.time
-    channel.io_loop._next_timeout = 1
-    throttler = RemoteThrottler(channel, 'test-service')
+def test_throttler_delayed_polling(throttler):
     throttler.credits = {'test-operation': 0}
     # noinspection PyProtectedMember
     throttler._delayed_polling()
-    assert channel.request_throttling_credits.call_count == 1
+    assert throttler.channel.request_throttling_credits.call_count == 1
     assert throttler.periodic
     throttler.close()
     throttler.periodic = None
@@ -71,19 +61,13 @@ def test_throttler_delayed_polling():
     assert throttler.periodic is None
 
 
-def test_throttler_request_callback():
-    channel = mock.MagicMock()
-    throttler = RemoteThrottler(channel, 'test-service')
+def test_throttler_request_callback(throttler):
     throttler.error_reporter = mock.MagicMock()
     # noinspection PyProtectedMember
-    future = mock.MagicMock()
-    future.exception = mock.MagicMock()
-    future.exception.return_value = Exception()
-    throttler._request_callback(future)
+    throttler._request_callback(None, Exception())
     assert throttler.error_reporter.error.call_count == 1
-    future.exception.return_value = None
-    future.result.return_value = mock.MagicMock()
-    future.result.return_value.body = """
+    response = mock.MagicMock()
+    content = """
         {
             \"balances\": [
                 {
@@ -93,9 +77,12 @@ def test_throttler_request_callback():
             ]
         }
     """
-    throttler._request_callback(future)
+    response.content = content
+    response.json = lambda: json.loads(response.content)
+    throttler._request_callback(response, None)
     assert throttler.credits['test-operation'] == 2.0
+    assert throttler.error_reporter.error.call_count == 1
 
-    future.result.return_value.body = '{ "bad": "json" }'
-    throttler._request_callback(future)
+    response.content = '{ "bad": "json" }'
+    throttler._request_callback(response, None)
     assert throttler.error_reporter.error.call_count == 2

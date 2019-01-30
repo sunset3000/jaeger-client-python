@@ -23,13 +23,10 @@ from opentracing.harness.api_check import APICompatibilityCheckMixin
 
 class APITest(unittest.TestCase, APICompatibilityCheckMixin):
 
-    reporter = NullReporter()
-    sampler = ConstSampler(True)
-    _tracer = Tracer(
-        service_name='test_service_1', reporter=reporter, sampler=sampler)
-
     def tracer(self):
-        return APITest._tracer
+        reporter = NullReporter()
+        sampler = ConstSampler(True)
+        return Tracer(service_name='test_service_1', reporter=reporter, sampler=sampler)
 
     def test_binary_propagation(self):
         # TODO binary codecs are not implemented at the moment

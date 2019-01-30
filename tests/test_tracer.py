@@ -18,7 +18,6 @@ import six
 import socket
 
 import pytest
-import tornado.httputil
 
 from opentracing import Format, child_of
 from opentracing.ext import tags as ext_tags
@@ -154,14 +153,13 @@ def test_serialization(tracer, inject_mode):
         span_context=injectable, format=Format.TEXT_MAP, carrier=carrier
     )
     assert len(carrier) > 0
-    h_ctx = tornado.httputil.HTTPHeaders(carrier)
-    assert 'UBER-TRACE-ID' in h_ctx
-    ctx2 = tracer.extract(Format.TEXT_MAP, carrier)
-    assert ctx2 is not None
-    assert ctx2.trace_id == span.trace_id
-    assert ctx2.span_id == span.span_id
-    assert ctx2.parent_id == span.parent_id
-    assert ctx2.flags == span.flags
+    assert 'uber-trace-id' in carrier
+    ctx = tracer.extract(Format.TEXT_MAP, carrier)
+    assert ctx is not None
+    assert ctx.trace_id == span.trace_id
+    assert ctx.span_id == span.span_id
+    assert ctx.parent_id == span.parent_id
+    assert ctx.flags == span.flags
 
 
 def test_serialization_error(tracer):

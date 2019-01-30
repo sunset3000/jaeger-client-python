@@ -16,36 +16,29 @@ from __future__ import print_function
 from six.moves import range
 
 import logging
+from threading import Event
 import time
 import collections
 
 import mock
-import pytest
-import tornado.gen
 import jaeger_client.reporter
 
-from tornado.concurrent import Future
 from jaeger_client import Span, SpanContext
 from jaeger_client.metrics import LegacyMetricsFactory, Metrics
 from jaeger_client.utils import ErrorReporter
-from tornado.ioloop import IOLoop
-from tornado.testing import AsyncTestCase, gen_test
 from jaeger_client.reporter import Reporter
-from jaeger_client.ioloop_util import future_result
 
 
 def test_null_reporter():
     reporter = jaeger_client.reporter.NullReporter()
     reporter.report_span({})
-    f = reporter.close()
-    f.result()
+    assert reporter.close() is True
 
 
 def test_in_memory_reporter():
     reporter = jaeger_client.reporter.InMemoryReporter()
     reporter.report_span({})
-    f = reporter.close()
-    f.result()
+    assert reporter.close() is True
     spans = reporter.get_spans()
     assert [{}] == spans
 
@@ -55,7 +48,7 @@ def test_logging_reporter():
     reporter = jaeger_client.reporter.LoggingReporter(logger=log_mock)
     reporter.report_span({})
     log_mock.info.assert_called_with('Reporting span %s', {})
-    reporter.close().result()
+    assert reporter.close() is True
 
 
 def test_composite_reporter():
@@ -81,17 +74,11 @@ def test_composite_reporter():
         with mock.patch('jaeger_client.reporter.LoggingReporter.close') \
                 as log_mock:
 
-            f1 = Future()
-            f2 = Future()
-            null_mock.return_value = f1
-            log_mock.return_value = f2
-            f = reporter.close()
+            null_mock.return_value = True
+            log_mock.return_value = True
+            assert reporter.close()
             null_mock.assert_called_once()
             log_mock.assert_called_once()
-            assert not f.done()
-            f1.set_result(True)
-            f2.set_result(True)
-            assert f.done()
 
 
 class FakeSender(object):
@@ -104,12 +91,16 @@ class FakeSender(object):
         self.requests = []
         self.futures = []
 
-    def __call__(self, spans):
-        # print('ManualSender called', request)
-        self.requests.append(spans)
-        fut = Future()
+    def __call__(self, batch):
+        self.requests.append(batch)
+        fut = Event()
         self.futures.append(fut)
-        return fut
+
+        def waiter():
+            fut.wait()
+            return 1
+
+        return waiter()
 
 
 class HardErrorReporter(object):
@@ -132,10 +123,7 @@ class FakeMetricsFactory(LegacyMetricsFactory):
         self.counters[key] = value + self.counters.get(key, 0)
 
 
-class ReporterTest(AsyncTestCase):
-    @pytest.yield_fixture
-    def thread_loop(self):
-        yield
+class TestReporter(object):
 
     @staticmethod
     def _new_span(name):
@@ -153,9 +141,8 @@ class ReporterTest(AsyncTestCase):
         return span
 
     @staticmethod
-    def _new_reporter(batch_size, flush=None, queue_cap=100):
+    def _new_reporter(request, batch_size, flush=None, queue_cap=100):
         reporter = Reporter(channel=mock.MagicMock(),
-                            io_loop=IOLoop.current(),
                             batch_size=batch_size,
                             flush_interval=flush,
                             metrics_factory=FakeMetricsFactory(),
@@ -164,28 +151,27 @@ class ReporterTest(AsyncTestCase):
         reporter.set_process('service', {}, max_length=0)
         sender = FakeSender()
         reporter._sender.send = sender
+        request.addfinalizer(reporter.close)
         return reporter, sender
 
-    @tornado.gen.coroutine
     def _wait_for(self, fn):
         """Wait until fn() returns truth, but not longer than 1 second."""
-        start = time.time()
         for i in range(1000):
             if fn():
-                return
-            yield tornado.gen.sleep(0.001)
-        print('waited for condition %f seconds' % (time.time() - start))
+                return True
+            time.sleep(0.001)
+        return False
 
-    @gen_test
-    def test_submit_batch_size_1(self):
-        reporter, sender = self._new_reporter(batch_size=1)
+    def test_submit_batch_size_1(self, request):
+        reporter, sender = self._new_reporter(request, batch_size=1)
+
         reporter.report_span(self._new_span('1'))
 
-        yield self._wait_for(lambda: len(sender.futures) > 0)
+        self._wait_for(lambda: len(sender.futures) > 0)
         assert 1 == len(sender.futures)
 
-        sender.futures[0].set_result(1)
-        yield reporter.close()
+        sender.futures[0].set()
+        reporter.close()
         assert 1 == len(sender.futures)
 
         # send after close
@@ -193,24 +179,26 @@ class ReporterTest(AsyncTestCase):
         assert span_dropped_key not in reporter.metrics_factory.counters
         reporter.report_span(self._new_span('1'))
         assert 1 == reporter.metrics_factory.counters[span_dropped_key]
+        assert 1 == len(sender.futures)
 
-    @gen_test
-    def test_sender_flushed_with_partial_batch(self):
-        reporter, sender = self._new_reporter(batch_size=100, flush=.5)
+    def test_sender_flushed_with_partial_batch(self, request):
+        reporter, sender = self._new_reporter(request, batch_size=100, flush=.5)
         for i in range(50):
             reporter.report_span(self._new_span(str(i)))
 
-        yield self._wait_for(lambda: len(sender.futures) > 0)
+        self._wait_for(lambda: len(sender.futures) > 0)
         assert 1 == len(sender.futures)
-        sender.futures[0].set_result(1)
+        sender.futures[0].set()
+
+        for future in sender.futures[1:]:
+            future.set()
 
         span_sent_key = 'jaeger:reporter_spans.result_ok'
-        yield self._wait_for(lambda: span_sent_key in reporter.metrics_factory.counters)
+        self._wait_for(lambda: span_sent_key in reporter.metrics_factory.counters)
         assert reporter.metrics_factory.counters[span_sent_key] == 50
 
-    @gen_test
-    def test_sender_flush_errors_handled_with_partial_batch(self):
-        reporter, sender = self._new_reporter(batch_size=100, flush=.5)
+    def test_sender_flush_errors_handled_with_partial_batch(self, request):
+        reporter, sender = self._new_reporter(request, batch_size=100, flush=.5)
         reporter.error_reporter = ErrorReporter(
             metrics=Metrics(), logger=logging.getLogger())
         reporter._sender.send = mock.MagicMock(side_effect=ValueError())
@@ -218,12 +206,11 @@ class ReporterTest(AsyncTestCase):
             reporter.report_span(self._new_span(str(i)))
 
         reporter_failure_key = 'jaeger:reporter_spans.result_err'
-        yield self._wait_for(lambda: reporter_failure_key in reporter.metrics_factory.counters)
+        self._wait_for(lambda: reporter_failure_key in reporter.metrics_factory.counters)
         assert reporter.metrics_factory.counters[reporter_failure_key] == 50
 
-    @gen_test
-    def test_submit_failure(self):
-        reporter, sender = self._new_reporter(batch_size=1)
+    def test_submit_failure(self, request):
+        reporter, sender = self._new_reporter(request, batch_size=1)
         reporter.error_reporter = ErrorReporter(
             metrics=Metrics(), logger=logging.getLogger())
 
@@ -232,65 +219,62 @@ class ReporterTest(AsyncTestCase):
 
         reporter._sender.send = mock.MagicMock(side_effect=ValueError())
         reporter.report_span(self._new_span('1'))
-        yield self._wait_for(
+        self._wait_for(
             lambda: reporter_failure_key in reporter.metrics_factory.counters)
         assert 1 == reporter.metrics_factory.counters.get(reporter_failure_key)
 
-    @gen_test
-    def test_submit_queue_full_batch_size_1(self):
-        reporter, sender = self._new_reporter(batch_size=1, queue_cap=1)
+    def test_submit_queue_full_batch_size_1(self, request):
+        reporter, sender = self._new_reporter(request, batch_size=1, queue_cap=1)
         reporter.report_span(self._new_span('1'))
 
-        yield self._wait_for(lambda: len(sender.futures) > 0)
+        self._wait_for(lambda: len(sender.futures) > 0)
         assert 1 == len(sender.futures)
         # the consumer is blocked on a future, so won't drain the queue
         reporter.report_span(self._new_span('2'))
         span_dropped_key = 'jaeger:reporter_spans.result_dropped'
         assert span_dropped_key not in reporter.metrics_factory.counters
         reporter.report_span(self._new_span('3'))
-        yield self._wait_for(
+        self._wait_for(
             lambda: span_dropped_key in reporter.metrics_factory.counters
         )
         assert 1 == reporter.metrics_factory.counters.get(span_dropped_key)
         # let it drain the queue
-        sender.futures[0].set_result(1)
-        yield self._wait_for(lambda: len(sender.futures) > 1)
+        sender.futures[0].set()
+        self._wait_for(lambda: len(sender.futures) > 1)
         assert 2 == len(sender.futures)
 
-        sender.futures[1].set_result(1)
-        yield reporter.close()
+        sender.futures[1].set()
+        reporter.close()
 
-    @gen_test
-    def test_submit_batch_size_2(self):
-        reporter, sender = self._new_reporter(batch_size=2, flush=0.01)
+    def test_submit_batch_size_2(self, request):
+        reporter, sender = self._new_reporter(request, batch_size=2, flush=0.01)
         reporter.report_span(self._new_span('1'))
-        yield tornado.gen.sleep(0.001)
+        time.sleep(0.001)
         assert 0 == len(sender.futures)
 
         reporter.report_span(self._new_span('2'))
-        yield self._wait_for(lambda: len(sender.futures) > 0)
+        self._wait_for(lambda: len(sender.futures) > 0)
         assert 1 == len(sender.futures)
         assert 2 == len(sender.requests[0].spans)
-        sender.futures[0].set_result(1)
+        sender.futures[0].set()
 
         # 3rd span will not be submitted right away, but after `flush` interval
         reporter.report_span(self._new_span('3'))
-        yield tornado.gen.sleep(0.001)
+        time.sleep(0.001)
         assert 1 == len(sender.futures)
-        yield tornado.gen.sleep(0.001)
+        time.sleep(0.001)
         assert 1 == len(sender.futures)
-        yield tornado.gen.sleep(0.01)
+        time.sleep(0.01)
         assert 2 == len(sender.futures)
-        sender.futures[1].set_result(1)
+        sender.futures[1].set()
 
-        yield reporter.close()
+        reporter.close()
 
-    @gen_test
-    def test_close_drains_queue(self):
-        reporter, sender = self._new_reporter(batch_size=1, flush=0.5)
+    def test_close_drains_queue(self, request):
+        reporter, sender = self._new_reporter(request, batch_size=1, flush=5)
         reporter.report_span(self._new_span('0'))
 
-        yield self._wait_for(lambda: len(sender.futures) > 0)
+        self._wait_for(lambda: len(sender.futures) > 0)
         assert 1 == len(sender.futures)
 
         # now that the consumer is blocked on the first future.
@@ -300,7 +284,7 @@ class ReporterTest(AsyncTestCase):
 
         def send(_):
             count[0] += 1
-            return future_result(True)
+            return 1
 
         reporter._sender.send = send
         reporter._sender._batch_size = 3
@@ -309,21 +293,14 @@ class ReporterTest(AsyncTestCase):
         assert reporter.queue.qsize() == 10, 'queued 10 spans'
 
         # now unblock consumer
-        sender.futures[0].set_result(1)
-        yield self._wait_for(lambda: count[0] > 2)
+        sender.futures[0].set()
+        assert self._wait_for(lambda: count[0] > 2)
 
         assert count[0] == 3, '9 out of 10 spans submitted in 3 batches'
-        assert reporter.queue._unfinished_tasks == 1, 'one span still pending'
+        assert self._wait_for(
+            lambda: reporter.queue.unfinished_tasks == 1
+        ), 'one span still pending'
 
-        yield reporter.close()
+        reporter.close()
         assert reporter.queue.qsize() == 0, 'all spans drained'
         assert count[0] == 4, 'last span submitted in one extrac batch'
-
-
-class TestReporterUnit:
-
-    def test_reporter_obtains_io_loop_from_sender(self):
-        channel = mock.MagicMock()
-        sender = mock.MagicMock()
-        reporter = Reporter(channel=channel, sender=sender)
-        assert reporter.io_loop == sender._io_loop, "Reporter didn't set its io_loop from Sender's"

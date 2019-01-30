@@ -14,13 +14,14 @@
 
 from __future__ import absolute_import, division
 
-import json
 import logging
 import random
+import time
 import six
 
-from threading import Lock
-from tornado.ioloop import PeriodicCallback
+from threading import Lock, Thread
+
+from .ioloop_util import PeriodicCallback
 from .constants import (
     _max_id_bits,
     DEFAULT_SAMPLING_INTERVAL,
@@ -367,22 +368,24 @@ class RemoteControlledSampler(Sampler):
         else:
             self.sampler.is_sampled(0)  # assert we got valid sampler API
 
-        self.lock = Lock()
+        self.sample_lock = Lock()
+        self._polling_lock = Lock()
         self.running = True
         self.periodic = None
-
-        self.io_loop = channel.io_loop
-        if not self.io_loop:
-            self.logger.error(
-                'Cannot acquire IOLoop, sampler will not be updated')
-        else:
-            # according to IOLoop docs, it's not safe to use timeout methods
-            # unless already running in the loop, so we use `add_callback`
-            self.io_loop.add_callback(self._init_polling)
+        self._init_polling_thread = None
+        self._polling_initialized = False
 
     def is_sampled(self, trace_id, operation=''):
-        with self.lock:
-            return self.sampler.is_sampled(trace_id, operation)
+        if not self._polling_initialized:
+            with self._polling_lock:
+                if self.running and self._init_polling_thread is None:
+                    self._init_polling_thread = Thread(target=self._init_polling)
+                    self._init_polling_thread.start()
+                    self._polling_initialized = True
+
+        with self.sample_lock:
+            sampled = self.sampler.is_sampled(trace_id, operation)
+        return sampled
 
     def _init_polling(self):
         """
@@ -391,68 +394,53 @@ class RemoteControlledSampler(Sampler):
         To avoid spiky traffic from the samplers, we use a random delay
         before the first poll.
         """
-        with self.lock:
-            if not self.running:
-                return
-            r = random.Random()
-            delay = r.random() * self.sampling_refresh_interval
-            self.io_loop.call_later(delay=delay,
-                                    callback=self._delayed_polling)
-            self.logger.info(
-                'Delaying sampling strategy polling by %d sec', delay)
+        if not self.running:
+            return
+        r = random.Random()
+        delay = r.random() * self.sampling_refresh_interval / 1000.0
+        self.logger.info(
+            'Delaying sampling strategy polling by %d sec', delay)
+        time.sleep(delay)
+        self._delayed_polling()
 
     def _delayed_polling(self):
         periodic = self._create_periodic_callback()
         self._poll_sampling_manager()  # Initialize sampler now
-        with self.lock:
-            if not self.running:
-                return
-            self.periodic = periodic
-            periodic.start()  # start the periodic cycle
-            self.logger.info(
-                'Tracing sampler started with sampling refresh '
-                'interval %d sec', self.sampling_refresh_interval)
+        if not self.running:
+            return
+        self.periodic = periodic
+        periodic.start()  # start the periodic cycle
+        self.logger.info(
+            'Tracing sampler started with sampling refresh '
+            'interval %d sec', self.sampling_refresh_interval)
 
     def _create_periodic_callback(self):
         return PeriodicCallback(
             callback=self._poll_sampling_manager,
             # convert interval to milliseconds
-            callback_time=self.sampling_refresh_interval * 1000,
-            io_loop=self.io_loop)
+            callback_time=self.sampling_refresh_interval * 1000)
 
-    def _sampling_request_callback(self, future):
-        exception = future.exception()
-        if exception:
+    def _sampling_request_callback(self, response, exc):
+        if exc:
             self.metrics.sampler_query_failure(1)
-            self.error_reporter.error(
-                'Fail to get sampling strategy from jaeger-agent: %s',
-                exception)
+            self.error_reporter.error('Fail to get sampling strategy from jaeger-agent: %s', exc)
             return
 
-        response = future.result()
-
-        # In Python 3.5 response.body is of type bytes and json.loads() does only support str
-        # See: https://github.com/jaegertracing/jaeger-client-python/issues/180
-        if hasattr(response.body, 'decode') and callable(response.body.decode):
-            response_body = response.body.decode('utf-8')
-        else:
-            response_body = response.body
-
         try:
-            sampling_strategies_response = json.loads(response_body)
+            sampling_strategies_response = response.json()
             self.metrics.sampler_retrieved(1)
         except Exception as e:
             self.metrics.sampler_query_failure(1)
             self.error_reporter.error(
                 'Fail to parse sampling strategy '
-                'from jaeger-agent: %s [%s]', e, response_body)
+                'from jaeger-agent: %s [%s]', e, response.content)
             return
 
         self._update_sampler(sampling_strategies_response)
         self.logger.debug('Tracing sampler set to %s', self.sampler)
 
     def _update_sampler(self, response):
-        with self.lock:
+        with self.sample_lock:
             try:
                 if response.get(OPERATION_SAMPLING_STR):
                     self._update_adaptive_sampler(response.get(OPERATION_SAMPLING_STR))
@@ -496,14 +484,26 @@ class RemoteControlledSampler(Sampler):
 
     def _poll_sampling_manager(self):
         self.logger.debug('Requesting tracing sampler refresh')
-        fut = self._channel.request_sampling_strategy(self.service_name)
-        fut.add_done_callback(self._sampling_request_callback)
+        sampling_strategy_response = None
+        e = None
+        try:
+            sampling_strategy_response = self._channel.request_sampling_strategy(self.service_name)
+        except Exception as exc:
+            e = exc
+        self._sampling_request_callback(sampling_strategy_response, e)
 
     def close(self):
-        with self.lock:
-            self.running = False
-            if self.periodic:
+        self.running = False
+        if not self._polling_initialized:
+            return
+        with self._polling_lock:
+            if self.periodic is not None:
                 self.periodic.stop()
+                self.periodic = None
+            if self._init_polling_thread is not None:
+                self._init_polling_thread.join()
+                self._init_polling_thread = None
+            self._polling_initialized = False
 
 
 def get_sampling_probability(strategy=None):

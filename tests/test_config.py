@@ -157,6 +157,7 @@ class ConfigTests(unittest.TestCase):
         tracer = c.initialize_tracer()
 
         assert opentracing.tracer == tracer
+        tracer.close()
 
     def test_default_local_agent_reporting_port(self):
         c = Config({}, service_name='x')
@@ -185,6 +186,7 @@ class ConfigTests(unittest.TestCase):
         assert tracer
         attempt = c.initialize_tracer()
         assert attempt is None
+        tracer.close()
 
     def test_jaeger_endpoint(self): c = Config({'jaeger_endpoint': 'some_endpoint'}, service_name='x')
         assert c.jaeger_endpoint == 'some_endpoint'
@@ -238,3 +240,4 @@ class ConfigTests(unittest.TestCase):
         c = Config({'jaeger_endpoint': 'some_endpoint'}, service_name='x')
         tracer = c.initialize_tracer()
         assert isinstance(tracer.reporter._sender, HTTPSender)
+        tracer.close()

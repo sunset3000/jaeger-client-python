@@ -368,7 +368,7 @@ class Config(object):
         with Config._initialized_lock:
             return Config._initialized
 
-    def initialize_tracer(self, io_loop=None):
+    def initialize_tracer(self):
         """
         Initialize Jaeger Tracer based on the passed `jaeger_client.Config`.
         Save it to `opentracing.tracer` global variable.
@@ -381,18 +381,17 @@ class Config(object):
                 return
             Config._initialized = True
 
-        tracer = self.new_tracer(io_loop)
+        tracer = self.new_tracer()
 
         self._initialize_global_tracer(tracer=tracer)
         return tracer
 
-    def new_tracer(self, io_loop=None):
+    def new_tracer(self):
         """
         Create a new Jaeger Tracer based on the passed `jaeger_client.Config`.
         Does not set `opentracing.tracer` global variable.
         """
         channel = self._create_local_agent_channel(
-            io_loop=io_loop,
             reader=bool(self.jaeger_endpoint)
         )
         sender = None
@@ -402,7 +401,6 @@ class Config(object):
                 auth_token=self.jaeger_auth_token,
                 user=self.jaeger_user,
                 password=self.jaeger_password,
-                io_loop=channel.io_loop
             )
 
         sampler = self.sampler
@@ -470,7 +468,7 @@ class Config(object):
         logger.info('opentracing.tracer initialized to %s[app_name=%s]',
                     tracer, self.service_name)
 
-    def _create_local_agent_channel(self, io_loop, reader=False):
+    def _create_local_agent_channel(self, reader=False):
         """
         Create an out-of-process channel communicating to local jaeger-agent.
         Spans are submitted as SOCK_DGRAM Thrift, sampling strategy is polled
@@ -490,5 +488,4 @@ class Config(object):
             sampling_port=self.local_agent_sampling_port,
             reporting_port=self.local_agent_reporting_port,
             throttling_port=self.throttler_port,
-            io_loop=io_loop
         )

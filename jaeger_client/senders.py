@@ -22,7 +22,7 @@ from . import thrift
 from .utils import raise_with_value
 from .local_agent_net import LocalAgentSender
 from thrift.TSerialization import serialize
-from thrift.protocol import TBinaryProtocol, TCompactProtocol
+from thrift.protocol import TCompactProtocol
 from thrift.transport import TTransport
 
 from jaeger_client.thrift_gen.agent import Agent
@@ -33,10 +33,13 @@ logger = logging.getLogger('jaeger_tracing')
 
 class Sender(object):
     def __init__(self, batch_size=10):
+        """
+        :param batch_size: how many spans we can submit at once to Collector
+        """
         from threading import Lock
         self._process_lock = Lock()
         self._process = None
-        self._batch_size = batch_size
+        self.batch_size = batch_size
         self.spans = []
 
     def append(self, span):
@@ -47,7 +50,7 @@ class Sender(object):
         spans_flushed = 0
         self.spans.append(span)
 
-        if len(self.spans) == self._batch_size:
+        if len(self.spans) == self.batch_size:
             spans_flushed = self.flush()
 
         return spans_flushed
@@ -101,12 +104,12 @@ class UDPSenderException(Exception):
 
 class UDPSender(Sender):
 
-    def __init__(self, host, port, agent=None, batch_size=10):
+    def __init__(self, channel=None, batch_size=10):
         super(UDPSender, self).__init__(batch_size=batch_size)
-        self._host = host
-        self._port = port
-        self._channel = self._create_local_agent_channel()
-        self._agent = agent or Agent.Client(self._channel, self)
+        self._channel = channel or self._create_local_agent_channel()
+        self._host = self._channel._host
+        self._port = self._channel._reporting_port
+        self._agent = Agent.Client(self.getProtocol(self._channel))
         self._max_span_space = None
 
     def send(self, batch):
@@ -177,11 +180,11 @@ class UDPSender(Sender):
 
         :param self: instance of Config
         """
-        logger.info('Initializing Jaeger Tracer with UDP reporter')
+        from .config import DEFAULT_REPORTING_HOST, DEFAULT_REPORTING_PORT, DEFAULT_SAMPLING_PORT
         return LocalAgentSender(
-            host=self._host,
-            sampling_port=5778,
-            reporting_port=self._port,
+            host=DEFAULT_REPORTING_HOST,
+            sampling_port=DEFAULT_SAMPLING_PORT,
+            reporting_port=DEFAULT_REPORTING_PORT
         )
 
     # method for protocol factory
@@ -195,8 +198,8 @@ class UDPSender(Sender):
 
 
 class HTTPSender(Sender):
-    def __init__(self, endpoint, auth_token='', user='', password=''):
-        super(HTTPSender, self).__init__()
+    def __init__(self, endpoint, auth_token='', user='', password='', batch_size=10):
+        super(HTTPSender, self).__init__(batch_size=batch_size)
         self.url = endpoint
         self.auth_token = auth_token
         self.user = user
@@ -230,12 +233,3 @@ class HTTPSender(Sender):
             raise
         except Exception as e:
             raise_with_value(e, 'POST to jaeger_endpoint failed: {}'.format(e))
-
-    # method for protocol factory
-    def getProtocol(self, transport):
-        """
-        Implements Thrift ProtocolFactory interface
-        :param: transport:
-        :return: Thrift compact protocol
-        """
-        return TBinaryProtocol.TBinaryProtocol(transport)

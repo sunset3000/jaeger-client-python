@@ -173,34 +173,42 @@ class SenderFlushTest(object):
             c += 6
 
 
-def test_udp_sender_instantiate_thrift_agent():
+@pytest.fixture
+def channel():
+    channel = mock.MagicMock()
+    channel._reporting_port = 4242
+    channel._host = 'mock'
+    return channel
 
-    sender = senders.UDPSender(host='mock', port=4242)
+
+def test_udp_sender_instantiate_thrift_agent(channel):
+
+    sender = senders.UDPSender(channel)
 
     assert sender._agent is not None
     assert isinstance(sender._agent, Agent.Client)
 
 
-def test_udp_sender_intantiate_local_agent_channel():
+def test_udp_sender_intantiate_local_agent_channel(channel):
 
-    sender = senders.UDPSender(host='mock', port=4242)
+    sender = senders.UDPSender()
 
     assert sender._channel is not None
     assert isinstance(sender._channel, LocalAgentSender)
 
 
-def test_udp_sender_calls_agent_emitBatch_on_send():
+def test_udp_sender_calls_agent_emitBatch_on_send(channel):
 
     test_data = {'foo': 'bar'}
-    sender = senders.UDPSender(host='mock', port=4242)
+    sender = senders.UDPSender(channel)
     sender._agent = mock.Mock()
     sender.send(test_data)
     sender._agent.emitBatch.assert_called_once_with(test_data)
 
 
-def test_udp_sender_implements_thrift_protocol_factory():
+def test_udp_sender_implements_thrift_protocol_factory(channel):
 
-    sender = senders.UDPSender(host='mock', port=4242)
+    sender = senders.UDPSender(channel)
 
     assert callable(sender.getProtocol)
     protocol = sender.getProtocol(mock.MagicMock())

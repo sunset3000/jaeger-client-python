@@ -27,6 +27,7 @@ from jaeger_client import Span, SpanContext
 from jaeger_client.metrics import LegacyMetricsFactory, Metrics
 from jaeger_client.utils import ErrorReporter
 from jaeger_client.reporter import Reporter
+from jaeger_client.senders import Sender
 
 
 def test_null_reporter():
@@ -142,17 +143,16 @@ class TestReporter(object):
 
     @staticmethod
     def _new_reporter(request, batch_size, flush=None, queue_cap=100):
-        reporter = Reporter(channel=mock.MagicMock(),
-                            batch_size=batch_size,
+        reporter = Reporter(sender=Sender(batch_size),
                             flush_interval=flush,
                             metrics_factory=FakeMetricsFactory(),
                             error_reporter=HardErrorReporter(),
                             queue_capacity=queue_cap)
         reporter.set_process('service', {}, max_length=0)
-        sender = FakeSender()
-        reporter._sender.send = sender
+        send_method = FakeSender()
+        reporter._sender.send = send_method
         request.addfinalizer(reporter.close)
-        return reporter, sender
+        return reporter, send_method
 
     def _wait_for(self, fn):
         """Wait until fn() returns truth, but not longer than 1 second."""
@@ -287,7 +287,7 @@ class TestReporter(object):
             return 1
 
         reporter._sender.send = send
-        reporter._sender._batch_size = 3
+        reporter._sender.batch_size = 3
         for i in range(10):
             reporter.report_span(self._new_span('%s' % i))
         assert reporter.queue.qsize() == 10, 'queued 10 spans'

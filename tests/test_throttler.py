@@ -17,12 +17,14 @@ import mock
 import pytest
 
 from jaeger_client.throttler import RemoteThrottler
+from .conftest import wait_for
 
 
 @pytest.fixture
 def throttler():
     channel = mock.MagicMock()
-    throttler = RemoteThrottler(channel, 'test-service')
+    throttler = RemoteThrottler(channel, 'test-service',
+                                refresh_interval=.1)
     yield throttler
     throttler.close()
 
@@ -53,7 +55,7 @@ def test_throttler_delayed_polling(throttler):
     throttler.credits = {'test-operation': 0}
     # noinspection PyProtectedMember
     throttler._delayed_polling()
-    assert throttler.channel.request_throttling_credits.call_count == 1
+    assert wait_for(lambda: throttler.channel.request_throttling_credits.call_count == 1)
     assert throttler.periodic
     throttler.close()
     throttler.periodic = None

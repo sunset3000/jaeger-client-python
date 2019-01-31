@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import time
 
 import mock
 import pytest
@@ -23,3 +24,15 @@ def tracer():
     sampler = ConstSampler(True)
     return Tracer(
         service_name='test_service_1', reporter=reporter, sampler=sampler)
+
+
+def wait_for(fn, ms=1000):
+    """
+    Wait until fn() returns truth, but not longer than specified duration
+    (1000ms by default).  Returns True if fn() ever truthy, otherwise False.
+    """
+    for i in range(ms):
+        if fn():
+            return True
+        time.sleep(0.001)
+    return False

@@ -31,6 +31,7 @@ from jaeger_client.constants import (
 )
 from jaeger_client.sampler import RemoteControlledSampler, ConstSampler
 from jaeger_client.reporter import Reporter
+from jaeger_client.senders import UDPSender
 from jaeger_client.throttler import RemoteThrottler
 from jaeger_client.tracer import Tracer
 
@@ -69,7 +70,7 @@ class EndToEndHandler(object):
         init_sampler = cfg.sampler
         channel = self.local_agent_sender
 
-        reporter = Reporter(channel=channel,
+        reporter = Reporter(sender=UDPSender(channel),
                             flush_interval=cfg.reporter_flush_interval)
 
         remote_sampler = RemoteControlledSampler(

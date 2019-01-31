@@ -20,8 +20,6 @@ import threading
 
 from .constants import DEFAULT_FLUSH_INTERVAL
 from .metrics import Metrics, LegacyMetricsFactory
-from jaeger_client.thrift_gen.agent import Agent
-from .senders import UDPSender
 from .utils import ErrorReporter
 from six.moves import queue
 
@@ -68,21 +66,19 @@ class LoggingReporter(NullReporter):
 
 class Reporter(NullReporter):
     """Receives completed spans from Tracer and submits them out of process."""
-    def __init__(self, channel, queue_capacity=100, batch_size=10,
+    def __init__(self, sender=None, queue_capacity=100,
                  flush_interval=DEFAULT_FLUSH_INTERVAL, error_reporter=None,
-                 metrics=None, metrics_factory=None, sender=None, **kwargs):
+                 metrics=None, metrics_factory=None, **kwargs):
         """
-        :param channel: a communication channel to jaeger-agent
+        :param sender: an instance of a senders.Sender subclass for sending
+            batches of spans to jaeger.
         :param queue_capacity: how many spans we can hold in memory before
             starting to drop spans
-        :param batch_size: how many spans we can submit at once to Collector
         :param flush_interval: how often the auto-flush is called (in seconds)
         :param error_reporter:
         :param metrics: an instance of Metrics class, or None. This parameter
             has been deprecated, please use metrics_factory instead.
         :param metrics_factory: an instance of MetricsFactory class, or None.
-        :param sender: an instance of a senders.Sender subclass for sending
-            batches of spans to jaeger.
         :param kwargs:
             'logger'
         :return:
@@ -90,22 +86,16 @@ class Reporter(NullReporter):
         from threading import Lock
 
         # TODO for next major rev: remove channel param in favor of sender
-        self.agent = Agent.Client(channel, self)
-        self._sender = sender or UDPSender(
-            port=channel._reporting_port,
-            host=channel._host,
-            agent=self.agent,
-            batch_size=batch_size
-        )
+        # self.agent = Agent.Client()
+        self._sender = sender
         self.queue_capacity = queue_capacity
-        self.batch_size = batch_size
         self.metrics_factory = metrics_factory or LegacyMetricsFactory(metrics or Metrics())
         self.metrics = ReporterMetrics(self.metrics_factory)
         self.error_reporter = error_reporter or ErrorReporter(Metrics())
         self.logger = kwargs.get('logger', default_logger)
 
-        if queue_capacity < batch_size:
-            raise ValueError('Queue capacity cannot be less than batch size')
+        if queue_capacity < self._sender.batch_size:
+            raise ValueError('Queue capacity cannot be less than sender batch size')
 
         self.queue = queue.Queue(maxsize=queue_capacity)
         self.stop = object()  # sentinel
@@ -116,10 +106,6 @@ class Reporter(NullReporter):
 
     def set_process(self, service_name, tags, max_length):
         self._sender.set_process(service_name, tags, max_length)
-
-    # method for protocol factory
-    def getProtocol(self, transport):
-        return self._sender.getProtocol(transport)
 
     def report_span(self, span):
         """

@@ -28,7 +28,7 @@ from .reporter import (
     CompositeReporter,
     LoggingReporter,
 )
-from .senders import HTTPSender
+from .senders import HTTPSender, UDPSender
 from .sampler import (
     ConstSampler,
     ProbabilisticSampler,
@@ -383,14 +383,18 @@ class Config(object):
         channel = self._create_local_agent_channel(
             reader=bool(self.jaeger_endpoint)
         )
-        sender = None
         if self.jaeger_endpoint:
+            logger.info('Initializing reporter with HTTP sender.')
             sender = HTTPSender(
                 endpoint=self.jaeger_endpoint,
                 auth_token=self.jaeger_auth_token,
                 user=self.jaeger_user,
                 password=self.jaeger_password,
+                batch_size=self.reporter_batch_size
             )
+        else:
+            logger.info('Initializing reporter with UDP sender.')
+            sender = UDPSender(channel, batch_size=self.reporter_batch_size)
 
         sampler = self.sampler
         if not sampler:
@@ -405,14 +409,12 @@ class Config(object):
         logger.info('Using sampler %s', sampler)
 
         reporter = Reporter(
-            channel=channel,
+            sender=sender,
             queue_capacity=self.reporter_queue_size,
-            batch_size=self.reporter_batch_size,
             flush_interval=self.reporter_flush_interval,
             logger=logger,
             metrics_factory=self._metrics_factory,
             error_reporter=self.error_reporter,
-            sender=sender
         )
 
         if self.logging:

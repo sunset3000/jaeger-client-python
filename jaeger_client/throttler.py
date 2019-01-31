@@ -66,6 +66,7 @@ class RemoteThrottler(object):
             with self._polling_lock:
                 if self.running and self._init_polling_thread is None:
                     self._init_polling_thread = Thread(target=self._init_polling)
+                    self._init_polling_thread.daemon = True
                     self._init_polling_thread.start()
                 self._polling_initialized = True
 
@@ -101,7 +102,7 @@ class RemoteThrottler(object):
             return
 
         r = random.Random()
-        delay = r.random() * self.refresh_interval / 1000.0
+        delay = r.random() * self.refresh_interval
         self.logger.info(
             'Delaying throttling credit polling by %d sec', delay)
         time.sleep(delay)
@@ -112,17 +113,17 @@ class RemoteThrottler(object):
             return self.credits.keys()
 
     def _delayed_polling(self):
-        def callback():
+        def fetch_credits():
             self._fetch_credits(self._operations())
 
+        if not self.running:
+            return
+
         periodic = PeriodicCallback(
-            callback=callback,
+            callback=fetch_credits,
             # convert interval to milliseconds
             callback_time=self.refresh_interval * 1000
         )
-        self._fetch_credits(self._operations())
-        if not self.running:
-            return
         self.periodic = periodic
         self.periodic.start()
         self.logger.info(

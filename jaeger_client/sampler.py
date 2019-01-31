@@ -379,6 +379,7 @@ class RemoteControlledSampler(Sampler):
             with self._polling_lock:
                 if self.running and self._init_polling_thread is None:
                     self._init_polling_thread = Thread(target=self._init_polling)
+                    self._init_polling_thread.daemon = True
                     self._init_polling_thread.start()
                     self._polling_initialized = True
 
@@ -396,22 +397,22 @@ class RemoteControlledSampler(Sampler):
         if not self.running:
             return
         r = random.Random()
-        delay = r.random() * self.sampling_refresh_interval / 1000.0
+        delay = r.random() * self.sampling_refresh_interval
         self.logger.info(
             'Delaying sampling strategy polling by %d sec', delay)
         time.sleep(delay)
         self._delayed_polling()
 
     def _delayed_polling(self):
-        periodic = self._create_periodic_callback()
-        self._poll_sampling_manager()  # Initialize sampler now
         if not self.running:
             return
-        self.periodic = periodic
-        periodic.start()  # start the periodic cycle
-        self.logger.info(
-            'Tracing sampler started with sampling refresh '
-            'interval %d sec', self.sampling_refresh_interval)
+
+        if self.periodic is None:
+            self.periodic = self._create_periodic_callback()
+            self.periodic.start()  # start the periodic cycle
+            self.logger.info(
+                'Tracing sampler started with sampling refresh '
+                'interval %d sec', self.sampling_refresh_interval)
 
     def _create_periodic_callback(self):
         return PeriodicCallback(

@@ -353,7 +353,8 @@ def test_sampler_equality():
 def test_remotely_controlled_sampler():
     sampler = RemoteControlledSampler(
         channel=mock.MagicMock(),
-        service_name='x'
+        service_name='x',
+        sampling_refresh_interval=.001
     )
     sampled, tags = sampler.is_sampled(1)
     assert sampled
@@ -368,6 +369,7 @@ def test_remotely_controlled_sampler():
         service_name='x',
         init_sampler=init_sampler,
         logger=mock.MagicMock(),
+        sampling_refresh_interval=.001
     )
     assert init_sampler.is_sampled.call_count == 1
 
@@ -386,6 +388,7 @@ def test_remotely_controlled_sampler():
         channel=mock.MagicMock(),
         service_name='x',
         max_operations=None,
+        sampling_refresh_interval=.001
     )
     assert sampler.max_operations == DEFAULT_MAX_OPERATIONS
 

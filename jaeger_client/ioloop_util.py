@@ -33,12 +33,11 @@ class PeriodicCallback(object):
 
     def __init__(self, callback, callback_time):
         self.callback = callback
-        if callback_time <= 0:
+        if callback_time < 0:
             raise ValueError('callback_time must be positive')
         self.callback_time = callback_time
         self._scheduler_sleep = callback_time / 1000.0
         self._running = False
-        self._timeout = None
         self._lock = threading.Lock()
         self._scheduler_thread = None
         self._callback_thread = None
@@ -47,12 +46,11 @@ class PeriodicCallback(object):
         with self._lock:
             if self._running:
                 return
-
+            self._running = True
             if self._scheduler_thread is None:
                 self._scheduler_thread = threading.Thread(target=self._scheduler)
+                self._scheduler_thread.daemon = True
                 self._scheduler_thread.start()
-
-            self._running = True
 
     def stop(self):
         with self._lock:
@@ -61,8 +59,10 @@ class PeriodicCallback(object):
 
             if self._scheduler_thread is not None:
                 self._scheduler_thread.join()
+                self._scheduler_thread = None
             if self._callback_thread is not None:
                 self._callback_thread.join()
+                self._callback_thread = None
 
     def _scheduler(self):
         while self._running:
@@ -72,6 +72,7 @@ class PeriodicCallback(object):
                     self._callback_thread = None
             if self._callback_thread is None:
                 self._callback_thread = threading.Thread(target=self.callback)
+                self._callback_thread.daemon = True
                 self._callback_thread.start()
 
             time.sleep(self._scheduler_sleep)

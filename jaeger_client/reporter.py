@@ -102,6 +102,7 @@ class Reporter(NullReporter):
         self.stopped = False
         self.stop_lock = Lock()
         self.flush_interval = flush_interval or None
+        self._min_flush_interval = 10 ** -9
         self._consume_queue_thread = None
 
     def set_process(self, service_name, tags, max_length):
@@ -116,6 +117,7 @@ class Reporter(NullReporter):
         """
         if self._consume_queue_thread is None:
             self._consume_queue_thread = threading.Thread(target=self._consume_queue)
+            self._consume_queue_thread.daemon = True
             self._consume_queue_thread.start()
 
         try:
@@ -135,7 +137,7 @@ class Reporter(NullReporter):
             spans_appended = 0
             while True:
                 t0 = time.time()
-                timeout = interval if self.flush_interval else None
+                timeout = max(interval, self._min_flush_interval) if self.flush_interval else None
                 try:
                     span = self.queue.get(timeout=timeout)
                     t1 = time.time()
@@ -170,18 +172,22 @@ class Reporter(NullReporter):
                     interval -= t1 - t0
 
             try:
-                spans_reported = self._sender.flush()
+                try:
+                    spans_reported = self._sender.flush()
+                except Exception as exc:
+                    # Assume number of failed spans is equal to previously appended
+                    self.metrics.reporter_failure(spans_appended)
+                    self.error_reporter.error(exc)
+                    for _ in range(spans_appended):
+                        self.queue.task_done()
+                else:
+                    self.metrics.reporter_success(spans_reported)
+                    for _ in range(spans_reported):
+                        self.queue.task_done()
+                    self.metrics.reporter_queue_length(self.queue.qsize())
             except Exception as exc:
-                # Assume number of failed spans is equal to previously appended
-                self.metrics.reporter_failure(spans_appended)
-                self.error_reporter.error(exc)
-                for _ in range(spans_appended):
-                    self.queue.task_done()
-            else:
-                self.metrics.reporter_success(spans_reported)
-                for _ in range(spans_reported):
-                    self.queue.task_done()
-                self.metrics.reporter_queue_length(self.queue.qsize())
+                self.logger.error(exc)
+                break
 
         self.logger.info('Span publisher exited')
 
@@ -192,11 +198,9 @@ class Reporter(NullReporter):
         with self.stop_lock:
             self.stopped = True
         if self._consume_queue_thread is not None:
-            # Do not submit poison pill unless worker is guaranteed
-            # to consume or subsequent join will hang
             if self._consume_queue_thread.is_alive():
                 self.queue.put(self.stop)
-            self.queue.join()
+                self.queue.join()
             self._consume_queue_thread.join()
 
         return True

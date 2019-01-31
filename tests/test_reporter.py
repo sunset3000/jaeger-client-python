@@ -28,6 +28,7 @@ from jaeger_client.metrics import LegacyMetricsFactory, Metrics
 from jaeger_client.utils import ErrorReporter
 from jaeger_client.reporter import Reporter
 from jaeger_client.senders import Sender
+from conftest import wait_for
 
 
 def test_null_reporter():
@@ -142,32 +143,24 @@ class TestReporter(object):
         return span
 
     @staticmethod
-    def _new_reporter(request, batch_size, flush=None, queue_cap=100):
+    def _new_reporter(request, batch_size, flush=None, queue_cap=100, send_method=None):
         reporter = Reporter(sender=Sender(batch_size),
                             flush_interval=flush,
                             metrics_factory=FakeMetricsFactory(),
                             error_reporter=HardErrorReporter(),
                             queue_capacity=queue_cap)
         reporter.set_process('service', {}, max_length=0)
-        send_method = FakeSender()
+        send_method = send_method or FakeSender()
         reporter._sender.send = send_method
         request.addfinalizer(reporter.close)
         return reporter, send_method
-
-    def _wait_for(self, fn):
-        """Wait until fn() returns truth, but not longer than 1 second."""
-        for i in range(1000):
-            if fn():
-                return True
-            time.sleep(0.001)
-        return False
 
     def test_submit_batch_size_1(self, request):
         reporter, sender = self._new_reporter(request, batch_size=1)
 
         reporter.report_span(self._new_span('1'))
 
-        self._wait_for(lambda: len(sender.futures) > 0)
+        wait_for(lambda: len(sender.futures) > 0)
         assert 1 == len(sender.futures)
 
         sender.futures[0].set()
@@ -186,7 +179,7 @@ class TestReporter(object):
         for i in range(50):
             reporter.report_span(self._new_span(str(i)))
 
-        self._wait_for(lambda: len(sender.futures) > 0)
+        wait_for(lambda: len(sender.futures) > 0)
         assert 1 == len(sender.futures)
         sender.futures[0].set()
 
@@ -194,7 +187,7 @@ class TestReporter(object):
             future.set()
 
         span_sent_key = 'jaeger:reporter_spans.result_ok'
-        self._wait_for(lambda: span_sent_key in reporter.metrics_factory.counters)
+        wait_for(lambda: span_sent_key in reporter.metrics_factory.counters)
         assert reporter.metrics_factory.counters[span_sent_key] == 50
 
     def test_sender_flush_errors_handled_with_partial_batch(self, request):
@@ -206,7 +199,7 @@ class TestReporter(object):
             reporter.report_span(self._new_span(str(i)))
 
         reporter_failure_key = 'jaeger:reporter_spans.result_err'
-        self._wait_for(lambda: reporter_failure_key in reporter.metrics_factory.counters)
+        wait_for(lambda: reporter_failure_key in reporter.metrics_factory.counters)
         assert reporter.metrics_factory.counters[reporter_failure_key] == 50
 
     def test_submit_failure(self, request):
@@ -219,28 +212,25 @@ class TestReporter(object):
 
         reporter._sender.send = mock.MagicMock(side_effect=ValueError())
         reporter.report_span(self._new_span('1'))
-        self._wait_for(
-            lambda: reporter_failure_key in reporter.metrics_factory.counters)
+        wait_for(lambda: reporter_failure_key in reporter.metrics_factory.counters)
         assert 1 == reporter.metrics_factory.counters.get(reporter_failure_key)
 
     def test_submit_queue_full_batch_size_1(self, request):
         reporter, sender = self._new_reporter(request, batch_size=1, queue_cap=1)
         reporter.report_span(self._new_span('1'))
 
-        self._wait_for(lambda: len(sender.futures) > 0)
+        wait_for(lambda: len(sender.futures) > 0)
         assert 1 == len(sender.futures)
         # the consumer is blocked on a future, so won't drain the queue
         reporter.report_span(self._new_span('2'))
         span_dropped_key = 'jaeger:reporter_spans.result_dropped'
         assert span_dropped_key not in reporter.metrics_factory.counters
         reporter.report_span(self._new_span('3'))
-        self._wait_for(
-            lambda: span_dropped_key in reporter.metrics_factory.counters
-        )
+        wait_for(lambda: span_dropped_key in reporter.metrics_factory.counters)
         assert 1 == reporter.metrics_factory.counters.get(span_dropped_key)
         # let it drain the queue
         sender.futures[0].set()
-        self._wait_for(lambda: len(sender.futures) > 1)
+        wait_for(lambda: len(sender.futures) > 1)
         assert 2 == len(sender.futures)
 
         sender.futures[1].set()
@@ -253,7 +243,7 @@ class TestReporter(object):
         assert 0 == len(sender.futures)
 
         reporter.report_span(self._new_span('2'))
-        self._wait_for(lambda: len(sender.futures) > 0)
+        wait_for(lambda: len(sender.futures) > 0)
         assert 1 == len(sender.futures)
         assert 2 == len(sender.requests[0].spans)
         sender.futures[0].set()
@@ -274,7 +264,7 @@ class TestReporter(object):
         reporter, sender = self._new_reporter(request, batch_size=1, flush=5)
         reporter.report_span(self._new_span('0'))
 
-        self._wait_for(lambda: len(sender.futures) > 0)
+        wait_for(lambda: len(sender.futures) > 0)
         assert 1 == len(sender.futures)
 
         # now that the consumer is blocked on the first future.
@@ -294,13 +284,32 @@ class TestReporter(object):
 
         # now unblock consumer
         sender.futures[0].set()
-        assert self._wait_for(lambda: count[0] > 2)
+        assert wait_for(lambda: count[0] > 2)
 
         assert count[0] == 3, '9 out of 10 spans submitted in 3 batches'
-        assert self._wait_for(
+        assert wait_for(
             lambda: reporter.queue.unfinished_tasks == 1
         ), 'one span still pending'
 
         reporter.close()
         assert reporter.queue.qsize() == 0, 'all spans drained'
         assert count[0] == 4, 'last span submitted in one extrac batch'
+
+    def test_flush_interval(self, request):
+        reporter_store = [None]
+        count = [0]
+
+        def send(_):
+            count[0] += 1
+            if count[0] < 10:
+                reporter_store[0].report_span(self._new_span('span'))
+            return 1
+
+        reporter, sender = self._new_reporter(request, batch_size=100, flush=.001, send_method=send)
+        reporter_store[0] = reporter
+
+        # initiate lazy thread creation
+        reporter.report_span(self._new_span('span'))
+
+        assert wait_for((lambda: count[0] == 10), ms=100)
+        reporter.close()

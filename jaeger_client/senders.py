@@ -17,7 +17,7 @@ import socket
 import logging
 
 import requests
-from requests import post
+import requests.auth
 from . import thrift
 from .utils import raise_with_value
 from .local_agent_net import LocalAgentSender
@@ -200,10 +200,13 @@ class UDPSender(Sender):
 class HTTPSender(Sender):
     def __init__(self, endpoint, auth_token='', user='', password='', batch_size=10):
         super(HTTPSender, self).__init__(batch_size=batch_size)
+        self.client = requests.Session()
         self.url = endpoint
         self.auth_token = auth_token
         self.user = user
         self.password = password
+        if any((self.user, self.password)):
+            self.client.auth = requests.auth.HTTPBasicAuth(self.user, self.password)
 
     def send(self, batch):
         """
@@ -211,25 +214,13 @@ class HTTPSender(Sender):
         will be caught above in the exception handler of _submit().
         """
         headers = {'Content-Type': 'application/x-thrift'}
-
-        auth_args = {}
         if self.auth_token:
             headers['Authorization'] = 'Bearer {}'.format(self.auth_token)
-        elif self.user and self.password:
-            auth_args['auth_mode'] = 'basic'
-            auth_args['auth_username'] = self.user
-            auth_args['auth_password'] = self.password
 
-        body = serialize(batch)
-        headers['Content-Length'] = str(len(body))
+        data = serialize(batch)
+        headers['Content-Length'] = str(len(data))
 
         try:
-            post(url=self.url, headers=headers, body=body, **auth_args)
-        except socket.error as e:
-            raise_with_value(e, 'Failed to connect to jaeger_endpoint: {}'.format(e))
-        except requests.HTTPError as e:
-            # HTTPErrors don't use std Exception signature, so can be altered directly
-            e.message = 'Error received from Jaeger: {}'.format(e.message)
-            raise
+            self.client.post(url=self.url, headers=headers, data=data)
         except Exception as e:
             raise_with_value(e, 'POST to jaeger_endpoint failed: {}'.format(e))

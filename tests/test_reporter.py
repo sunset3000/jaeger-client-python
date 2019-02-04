@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from __future__ import print_function
+from __future__ import print_function, absolute_import
 from six.moves import range
 
 import logging
@@ -28,7 +28,7 @@ from jaeger_client.metrics import LegacyMetricsFactory, Metrics
 from jaeger_client.utils import ErrorReporter
 from jaeger_client.reporter import Reporter
 from jaeger_client.senders import Sender
-from conftest import wait_for
+from .conftest import wait_for
 
 
 def test_null_reporter():

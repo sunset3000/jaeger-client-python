@@ -20,6 +20,7 @@ import collections
 
 import mock
 import requests
+import requests.auth
 import pytest
 
 from jaeger_client import senders, thrift
@@ -60,7 +61,15 @@ class CustomException(Exception):
     pass
 
 
-class SenderFlushTest(object):
+@pytest.fixture
+def channel():
+    channel = mock.MagicMock()
+    channel._reporting_port = 4242
+    channel._host = 'mock'
+    return channel
+
+
+class TestSenderFlush(object):
 
     def span(self):
         FakeTracer = collections.namedtuple(
@@ -96,13 +105,13 @@ class SenderFlushTest(object):
             assert False, "Didn't Raise"
         assert sender.span_count == 0
 
-    def test_udp_sender_flush_reraises_exceptions(self):
+    def test_udp_sender_flush_reraises_exceptions(self, channel):
         exceptions = ((CustomException, 'Failed to send batch.',
                        'Failed to submit traces to jaeger-agent: Failed to send batch.'),
                       (socket.error, 'Connection Failed',
                        'Failed to submit traces to jaeger-agent socket: Connection Failed'))
         for exception, value, expected_value in exceptions:
-            sender = senders.UDPSender(host='mock', port=4242)
+            sender = senders.UDPSender(channel)
             sender.set_process('service', {}, max_length=0)
 
             sender.spans = [self.span()]
@@ -122,8 +131,8 @@ class SenderFlushTest(object):
                     assert False, "Didn't Raise"
                 assert sender.span_count == 0
 
-    def test_udp_sender_large_span_dropped_on_flush(self):
-        sender = senders.UDPSender(host='mock', port=4242)
+    def test_udp_sender_large_span_dropped_on_flush(self, channel):
+        sender = senders.UDPSender(channel)
         sender.set_process('service', {'tagOne': 'someTagValue'}, max_length=0)
 
         span_to_send = self.span()
@@ -147,8 +156,8 @@ class SenderFlushTest(object):
 
         assert batch_store[0].spans == [thrift.make_jaeger_span(span_to_send)]
 
-    def test_udp_sender_batches_spans_over_multiple_packets_on_flush(self):
-        sender = senders.UDPSender(host='mock', port=4242)
+    def test_udp_sender_batches_spans_over_multiple_packets_on_flush(self, channel):
+        sender = senders.UDPSender(channel)
         sender.set_process('service', {'tagOne': 'someTagValue'}, max_length=0)
 
         spans = [self.span() for _ in range(60)]
@@ -173,24 +182,14 @@ class SenderFlushTest(object):
             c += 6
 
 
-@pytest.fixture
-def channel():
-    channel = mock.MagicMock()
-    channel._reporting_port = 4242
-    channel._host = 'mock'
-    return channel
-
-
 def test_udp_sender_instantiate_thrift_agent(channel):
-
     sender = senders.UDPSender(channel)
 
     assert sender._agent is not None
     assert isinstance(sender._agent, Agent.Client)
 
 
-def test_udp_sender_intantiate_local_agent_channel(channel):
-
+def test_udp_sender_intantiate_local_agent_channel():
     sender = senders.UDPSender()
 
     assert sender._channel is not None
@@ -198,7 +197,6 @@ def test_udp_sender_intantiate_local_agent_channel(channel):
 
 
 def test_udp_sender_calls_agent_emitBatch_on_send(channel):
-
     test_data = {'foo': 'bar'}
     sender = senders.UDPSender(channel)
     sender._agent = mock.Mock()
@@ -207,7 +205,6 @@ def test_udp_sender_calls_agent_emitBatch_on_send(channel):
 
 
 def test_udp_sender_implements_thrift_protocol_factory(channel):
-
     sender = senders.UDPSender(channel)
 
     assert callable(sender.getProtocol)
@@ -215,7 +212,7 @@ def test_udp_sender_implements_thrift_protocol_factory(channel):
     assert isinstance(protocol, TCompactProtocol.TCompactProtocol)
 
 
-class HTTPSenderTest(object):
+class TestHTTPSender(object):
 
     def loaded_sender(self, *args, **kwargs):
         FakeTracer = collections.namedtuple('FakeTracer', ['ip_address', 'service_name'])
@@ -230,59 +227,55 @@ class HTTPSenderTest(object):
         return sender
 
     def test_http_sender_provides_proper_request_content(self):
-        sender = self.loaded_sender('some_endpoint')
+        sender = self.loaded_sender('http://some_endpoint')
 
         with mock.patch('requests.sessions.Session.post') as post:
             sender.flush()
             time.sleep(0.001)
-            request = post.call_args[0][0]
-            assert request.url == 'some_endpoint'
-            assert request.headers.get('Content-Type') == 'application/x-thrift'
-            assert int(request.headers.get('Content-Length')) == len(request.body)
-            assert request.auth_username is None
-            assert request.auth_password is None
-            assert request.headers.get('Authorization') is None
+            kwargs = post.call_args[1]
+            assert kwargs['url'] == 'http://some_endpoint'
+            assert kwargs['headers'].get('Content-Type') == 'application/x-thrift'
+            assert int(kwargs['headers'].get('Content-Length')) == len(kwargs['data'])
+            assert kwargs['headers'].get('Authorization') is None
 
     def test_http_sender_provides_auth_token(self):
-        sender = self.loaded_sender('some_endpoint', auth_token='SomeAuthToken')
+        sender = self.loaded_sender('http://some_endpoint', auth_token='SomeAuthToken')
 
-        with mock.patch('requests.sessions.Session.post') as post:
+        with mock.patch('requests.sessions.Session.send') as send:
             sender.flush()
-            time.sleep(0.001)
-            request = post.call_args[0][0]
+            request = send.call_args[0][0]
             assert request.headers.get('Authorization') == 'Bearer SomeAuthToken'
 
     def test_http_sender_provides_basic_auth(self):
-        sender = self.loaded_sender('some_endpoint', user='SomeUser', password='SomePassword')
+        sender = self.loaded_sender('http://some_endpoint',
+                                    user='SomeUser', password='SomePassword')
 
-        with mock.patch('requests.sessions.Session.post') as post:
+        mock_request = mock.MagicMock()
+        mock_request.headers = {}
+        requests.auth.HTTPBasicAuth('SomeUser', 'SomePassword')(mock_request)
+        expected_auth_header = mock_request.headers['Authorization']
+
+        with mock.patch('requests.sessions.Session.send') as send:
             sender.flush()
             time.sleep(0.001)
-            request = post.call_args[0][0]
-            assert request.auth_mode == 'basic'
-            assert request.auth_username == 'SomeUser'
-            assert request.auth_password == 'SomePassword'
+            request = send.call_args[0][0]
+            assert request.headers['Authorization']
+            assert request.headers['Authorization'] == expected_auth_header
 
     def test_http_sender_flush_reraises_exceptions(self):
         exceptions = ((CustomException('Failed to send batch.'),
                        'POST to jaeger_endpoint failed: Failed to send batch.'),
-                      (socket.error('Connection Failed'),
-                       'Failed to connect to jaeger_endpoint: Connection Failed'),
                       (requests.HTTPError(500, 'Server Error'),
-                      'HTTP 500: Error received from Jaeger: Server Error'))
+                      'POST to jaeger_endpoint failed: [Errno 500] Server Error'))
 
         for exception, expected_value in exceptions:
-            sender = self.loaded_sender('some_endpoint')
+            sender = self.loaded_sender('http://some_endpoint')
 
-            def mock_fetch(*args):
+            def send(*args, **kwargs):
                 raise exception
 
-            with mock.patch('requests.sessions.Session.post', mock_fetch):
-                try:
+            with mock.patch('requests.sessions.Session.send', send):
+                with pytest.raises(type(exception)) as exc:
                     sender.flush()
-                except Exception as exc:
-                    assert isinstance(exc, type(exception))
-                    assert str(exc) == expected_value
-                else:
-                    assert False, "Didn't Raise"
+                assert str(exc.value) == expected_value
                 assert sender.span_count == 0

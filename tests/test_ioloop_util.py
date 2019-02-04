@@ -36,7 +36,7 @@ class TestPeriodicCallback(object):
     def test_callback_time_gt_zero(self):
         with pytest.raises(ValueError) as exc:
             PeriodicCallback(lambda: True, -1)
-        assert exc.value.message == 'callback_time must be positive'
+        assert str(exc.value) == 'callback_time must be positive'
 
     def test_start_runs_callback_and_stop_halts_scheduling(self):
         count = [0]

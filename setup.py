@@ -16,10 +16,10 @@ assert version is not None, \
     'Could not determine version number from jaeger_client/__init__.py'
 
 setup(
-    name='jaeger-client',
+    name='sfx-jaeger-client',
     version=version,
-    url='https://github.com/jaegertracing/jaeger-client-python',
-    description='Jaeger Python OpenTracing Tracer implementation',
+    url='https://github.com/signalfx/jaeger-client-python',
+    description='SignalFx fork of Jaeger Python OpenTracing Tracer implementation',
     author='Yuri Shkuro',
     author_email='ys@uber.com',
     packages=find_packages(exclude=['crossdock', 'tests', 'example', 'tests.*']),

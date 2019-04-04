@@ -1,3 +1,4 @@
+# Modified by SignalFx
 # Copyright (c) 2016-2018 Uber Technologies, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -188,7 +189,8 @@ class ConfigTests(unittest.TestCase):
         assert attempt is None
         tracer.close()
 
-    def test_jaeger_endpoint(self): c = Config({'jaeger_endpoint': 'some_endpoint'}, service_name='x')
+    def test_jaeger_endpoint(self):
+        c = Config({'jaeger_endpoint': 'some_endpoint'}, service_name='x')
         assert c.jaeger_endpoint == 'some_endpoint'
         os.environ['JAEGER_ENDPOINT'] = 'SomeEndpoint'
         c = Config({}, service_name='x')

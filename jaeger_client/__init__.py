@@ -1,3 +1,4 @@
+# Modified by SignalFx
 # Copyright (c) 2016 Uber Technologies, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,7 +22,11 @@ import sys
 import jaeger_client.thrift_gen as modpath
 sys.path.append(modpath.__path__[0])
 
-__version__ = '3.13.1.dev0'
+# In order to track w/ Jaeger and comply to PEP 440 swap Jaeger dev release
+# w/ beta pre-release segment:
+# x.y.z.devA -> x.y.zbA.devB
+# Updated dev release (B) is for tracking changes against upstream version
+__version__ = '3.13.1b0.dev0'
 
 from .tracer import Tracer  # noqa
 from .config import Config  # noqa

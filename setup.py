@@ -1,5 +1,5 @@
-# Modified by SignalFx
 #!/usr/bin/env python
+# Modified by SignalFx
 # -*- coding: utf-8 -*-
 import re
 
@@ -17,7 +17,7 @@ assert version is not None, \
     'Could not determine version number from jaeger_client/__init__.py'
 
 setup(
-    name='jaeger-client',
+    name='sfx-jaeger-client',
     version=version,
     url='https://github.com/jaegertracing/jaeger-client-python',
     description='Jaeger Python OpenTracing Tracer implementation',

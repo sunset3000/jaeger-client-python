@@ -1,3 +1,4 @@
+# Modified by SignalFx
 project := jaeger_client
 projects := jaeger_client crossdock
 flake8 := flake8
